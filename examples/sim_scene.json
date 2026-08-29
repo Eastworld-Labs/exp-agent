@@ -1,0 +1,12 @@
+{
+  "mujoco_xml": "../../g1_sim_pipeline/models/menagerie/scene.xml",
+  "navigation_grid": "navigation_grid.json",
+  "semantic_map": "locations.json",
+  "gaussian_splat": null,
+  "gaussian_alignment": [
+    [1, 0, 0, 0],
+    [0, 1, 0, 0],
+    [0, 0, 1, 0],
+    [0, 0, 0, 1]
+  ]
+}
