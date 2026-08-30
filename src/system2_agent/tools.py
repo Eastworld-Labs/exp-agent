@@ -28,6 +28,7 @@ class Tool:
     handler: Callable[[Mapping[str, Any]], Any]
     kind: ToolKind = "observation"
     requires_approval: bool = False
+    refresh_world: bool = False
 
     def schema(self) -> Json:
         return {

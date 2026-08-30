@@ -7,8 +7,14 @@ from pathlib import Path
 from .agent import System2Agent
 from .model import OpenAICompatibleModel
 from .modules import CameraModule, NavigationModule, SemanticMapModule
-from .navigation_core import AStarPlanner, GridMap, PathFollower, PlannedNavigationBackend
+from .navigation_core import (
+    GridMap,
+    PlannedNavigationBackend,
+    RegulatedTrajectoryFollower,
+    SmoothTrajectoryPlanner,
+)
 from .scene_bundle import SceneBundle
+from .scene_loader import SceneLoader
 from .sim import G1MuJoCoBase, MuGSCamera, MuJoCoCamera
 
 
@@ -37,12 +43,29 @@ def main() -> None:
     scene = SceneBundle.from_json(args.scene)
     semantic_map = SemanticMapModule.from_json(scene.semantic_map)
     grid = GridMap.from_json(scene.navigation_grid)
+    robot_scene = (
+        root.parent
+        / "GR00T-WholeBodyControl"
+        / "gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml"
+    )
+    loaded_physics = SceneLoader(robot_scene).load(scene)
     base = G1MuJoCoBase(
-        model_path=scene.mujoco_xml,
+        model_path=loaded_physics.model_path,
         robot_class_path=root.parent / "robot_class",
     )
+    if scene.initial_pose is not None:
+        initial_x, initial_y, initial_yaw = scene.initial_pose
+        if grid.clearance(initial_x, initial_y) < scene.navigation_footprint_radius_m:
+            raise SystemExit("scene initial_pose is not collision-safe for the configured footprint")
+        base.set_initial_pose(Pose3D(initial_x, initial_y, yaw=initial_yaw))
+    planner = SmoothTrajectoryPlanner(
+        grid, footprint_radius_m=scene.navigation_footprint_radius_m
+    )
     backend = PlannedNavigationBackend(
-        AStarPlanner(grid), PathFollower(), base, realtime=args.realtime
+        planner,
+        RegulatedTrajectoryFollower(planner.grid),
+        base,
+        realtime=args.realtime,
     )
     try:
         if args.goal:
@@ -77,6 +100,7 @@ def main() -> None:
         print(json.dumps(outcome.__dict__, indent=2, default=list))
     finally:
         base.close()
+        loaded_physics.close()
 
 
 if __name__ == "__main__":

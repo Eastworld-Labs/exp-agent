@@ -58,12 +58,36 @@ class G1MuJoCoBase:
         yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
         return Pose3D(float(data.qpos[adr]), float(data.qpos[adr + 1]), float(data.qpos[adr + 2]), yaw)
 
+    def set_initial_pose(self, pose: Pose3D) -> None:
+        """Set live and reset-state base pose before a simulation mission."""
+        adr = self.robot._root_qposadr
+        model, data = self.robot._model, self.robot._data
+        if adr is None or model is None or data is None:
+            raise RuntimeError("G1 model does not have a connected free root joint")
+        quaternion = (
+            math.cos(pose.yaw / 2.0),
+            0.0,
+            0.0,
+            math.sin(pose.yaw / 2.0),
+        )
+        model.qpos0[adr : adr + 2] = (pose.x, pose.y)
+        model.qpos0[adr + 3 : adr + 7] = quaternion
+        data.qpos[adr : adr + 2] = (pose.x, pose.y)
+        data.qpos[adr + 3 : adr + 7] = quaternion
+        data.qvel[:6] = 0.0
+        self.robot._mujoco.mj_forward(model, data)
+
     def command_velocity(self, command: VelocityCommand, dt: float) -> None:
         self.robot.send_action(
             {"base.vx": command.vx, "base.vy": command.vy, "base.vyaw": command.yaw_rate}
         )
         steps = max(1, round(dt / float(self.robot.config.timestep)))
-        self.robot.step(steps)
+        # This is intentionally the fast kinematic integration path. Advancing
+        # unconstrained MuJoCo dynamics here would make the floating-base model
+        # fall while no locomotion policy is controlling its legs.
+        for _ in range(steps):
+            self.robot._integrate_base_velocity()
+        self.robot._mujoco.mj_forward(self.robot._model, self.robot._data)
 
     def stop(self) -> None:
         if self.robot.is_connected:

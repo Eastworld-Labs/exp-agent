@@ -90,5 +90,5 @@ class NavigationModule:
         return dict(self.backend.status())
 
     def _navigate(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
-        goal = self.map.resolve(str(arguments["location"]))
+        goal = self.map.resolve_navigation_goal(str(arguments["location"]))
         return self.backend.navigate(goal)

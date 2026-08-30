@@ -1,6 +1,7 @@
 .DS_Store
 .env
 .venv/
+.venv_scene_import/
 __pycache__/
 *.egg-info/
 *.py[cod]
@@ -12,3 +13,10 @@ dist/
 *.engine
 *.plan
 *.ply
+MUJOCO_LOG.TXT
+artifacts/
+assets/generated/
+assets/scenes/
+assets/simfoundry/
+examples/lab3_splat_navigation_grid.json
+examples/multiroom_*

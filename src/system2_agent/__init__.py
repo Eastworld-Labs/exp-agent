@@ -2,6 +2,14 @@
 
 from .agent import System2Agent
 from .model import OpenAICompatibleModel
+from .navigation_core import LocalNavigationObservation, LocalNavigationObserver, LocalObstacle
 from .types import AgentOutcome
 
-__all__ = ["AgentOutcome", "OpenAICompatibleModel", "System2Agent"]
+__all__ = [
+    "AgentOutcome",
+    "LocalNavigationObservation",
+    "LocalNavigationObserver",
+    "LocalObstacle",
+    "OpenAICompatibleModel",
+    "System2Agent",
+]

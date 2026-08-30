@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
-from ..tools import Tool
+from ..tools import Tool, object_schema
 from ..types import Json
 
 
@@ -30,7 +30,18 @@ class CameraModule:
         self._last_labels: list[str] = []
 
     def tools(self) -> Sequence[Tool]:
-        return ()
+        return (
+            Tool(
+                name="observe_surroundings",
+                description=(
+                    "Capture fresh head and wrist camera frames for the next reasoning turn. "
+                    "Use this when local visual context is needed without moving the robot."
+                ),
+                parameters=object_schema({}),
+                handler=lambda _: {"state": "fresh_frames_requested"},
+                refresh_world=True,
+            ),
+        )
 
     def snapshot(self) -> Json:
         return {"last_frame_labels": self._last_labels}

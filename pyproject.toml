@@ -3,7 +3,7 @@ name = "exp-agent"
 version = "0.1.0"
 description = "A small, model-portable System-2 mission agent for robots."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
@@ -18,11 +18,17 @@ sonic = [
   "pyzmq>=25",
   "robot-class[sonic] @ git+https://github.com/Eastworld-Labs/robot_class.git",
 ]
+scene-import = [
+  "numpy>=1.24",
+  "plyfile>=1.1",
+  "usd-core>=25",
+]
 
 [project.scripts]
 exp-agent = "system2_agent.cli:main"
 exp-agent-sim = "system2_agent.sim_cli:main"
 exp-agent-sonic-sim = "system2_agent.official_sonic_sim_cli:main"
+exp-agent-import-simfoundry = "system2_agent.simfoundry_importer:main"
 
 [build-system]
 requires = ["hatchling"]

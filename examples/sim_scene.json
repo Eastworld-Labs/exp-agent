@@ -1,6 +1,7 @@
 {
-  "mujoco_xml": "../../g1_sim_pipeline/models/menagerie/scene.xml",
+  "external_mjcf": null,
   "navigation_grid": "navigation_grid.json",
+  "navigation_footprint_radius_m": 0.32,
   "semantic_map": "locations.json",
   "gaussian_splat": null,
   "gaussian_alignment": [
@@ -8,5 +9,6 @@
     [0, 1, 0, 0],
     [0, 0, 1, 0],
     [0, 0, 0, 1]
-  ]
+  ],
+  "initial_pose": {"x": 0.0, "y": 0.0, "yaw": 0.0}
 }

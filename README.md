@@ -54,7 +54,7 @@ src/system2_agent/modules/camera.py        fresh multimodal observations
 
 ## Quick start
 
-Python 3.11 or newer is required. The package itself has no runtime dependencies.
+Python 3.10 or newer is required. The package itself has no runtime dependencies.
 
 ```bash
 cd exp-agent
@@ -128,6 +128,11 @@ modules.append(CameraModule(HeadCamera()))
 The initial model request and every post-action request will then contain fresh
 frames. Keep safety and success detection independent of the VLM: camera reasoning
 can be wrong, stale, or temporarily unavailable.
+
+`CameraModule` also exposes `observe_surroundings()`. Calling it does not move the
+robot; it injects fresh head/wrist images into the next System-2 reasoning turn.
+This is for semantic inspection and mission decisions, not for producing
+control-rate velocity commands.
 
 ## The System-2 loop
 
@@ -354,10 +359,10 @@ There are two deliberately distinct paths:
 
 ```text
 Fast integration test
-System-2 -> A* -> path follower -> body velocity -> robot_class MuJoCo G1
+System-2 -> semantic goal -> smooth trajectory planner -> body velocity -> robot_class MuJoCo G1
 
 Policy-faithful sim2sim (Linux + NVIDIA GPU)
-System-2 -> A* -> path follower -> SONIC planner ZMQ command
+System-2 -> semantic goal -> smooth trajectory planner -> SONIC planner ZMQ command
           -> kinematic planner at 10 Hz -> SONIC v1.1 at 50 Hz
           -> low-level joint commands -> official GEAR-SONIC MuJoCo G1
 ```
@@ -412,20 +417,60 @@ PYTHONPATH=src:../robot_class:../GR00T-WholeBodyControl \
 PYTHONPATH=src:../robot_class:../GR00T-WholeBodyControl \
   ../GR00T-WholeBodyControl/.venv_sim/bin/python \
   -m system2_agent.official_sonic_sim_cli \
-  --sonic-variant sonic_v1_1 --goal "kitchen table"
+  --sonic-variant sonic_v1_1 --goal "charging station"
+
+# Preplan one collision-checked route through several semantic destinations:
+PYTHONPATH=src:../robot_class:../GR00T-WholeBodyControl \
+  ../GR00T-WholeBodyControl/.venv_sim/bin/python \
+  -m system2_agent.official_sonic_sim_cli \
+  --route "charging station,kitchen table,home" \
+  --record artifacts/sonic_semantic_route.mp4
 
 # System-2 + live head camera + full SONIC sim2sim:
 PYTHONPATH=src:../robot_class:../GR00T-WholeBodyControl \
   ../GR00T-WholeBodyControl/.venv_sim/bin/python \
   -m system2_agent.official_sonic_sim_cli \
-  --mission "go to the kitchen table and verify the scene" \
+  --mission "go to the charging station and verify the scene" \
   --model openai/YOUR_TOOL_AND_VISION_MODEL --with-vision
 ```
 
 SONIC v1.1 is a 50 Hz whole-body motion tracker. NVIDIA's target-velocity
-kinematic planner supplies its reference animation. The global A* planner in
-this package supplies the route; the local follower turns that route into
-bounded movement/facing/speed commands. The agent only calls `navigate_to`.
+kinematic planner supplies its reference animation. The navigation backend uses
+footprint-inflated A* as its complete global search, resamples and smooths that
+seed with a collision-checked elastic-band optimizer, and tracks the resulting
+trajectory with regulated look-ahead, clearance-aware speed control, and a
+forward collision rollout. It emits bounded movement/facing/speed commands to
+SONIC. The agent only calls `navigate_to(location, reason)`; none of the map,
+trajectory, controller, or joint-level details are exposed to the model.
+
+The `navigate_to` result includes the planning pipeline, trajectory point count,
+length, and minimum map clearance. The static splat-derived grid is the current
+collision source. In deployment, an SLAM/VIO pose and a live ESDF can replace
+the simulation pose/grid without changing the tool contract.
+
+### Global goals versus local perception
+
+The navigation boundary deliberately has two different information paths:
+
+```text
+System-2 agent -> semantic map -> map-frame destination -> global trajectory
+depth / LiDAR / vision costmap -> local observer -> regulated follower -> SONIC
+```
+
+`SemanticMapModule` owns language-grounded names, descriptions, affordances, and
+approach poses. The agent can call `describe_location()` before `navigate_to()`.
+The planner owns the building-scale collision-free route. During execution,
+`LocalNavigationObserver` can provide localized obstacles, sensor health, and an
+emergency-stop signal on every control tick. The regulated follower fuses those
+observations into its forward collision guard. Unhealthy perception fails closed;
+a temporary obstacle brakes the robot and navigation resumes when it clears.
+
+The recorded InteriorGS demo uses a static generated grid because that dataset
+does not provide a live depth stream. Real deployment must attach a depth, LiDAR,
+or ESDF adapter as `local_observer`; the interface is present and tested, but RGB
+images alone are not treated as metric collision geometry. Nav2 MPPI, nvblox,
+X-Mobility, or another local controller can replace the regulated follower behind
+the same `navigate_to(location, reason)` tool.
 
 The official deploy build requires Ubuntu, CUDA and the exact supported
 TensorRT version. It cannot be built or policy-tested on macOS. The lightweight
@@ -447,7 +492,8 @@ safe global route.
 
 X-Mobility is attractive later as a learned **local controller** because it can
 react directly to vision and transfer between embodiments. For an understandable
-first stack, the included A* + path follower is much smaller and deterministic.
+first stack, the included global search + trajectory optimizer + regulated
+controller is smaller and deterministic.
 Nav2 becomes worthwhile when lifecycle management, recovery behaviors, mature
 costmaps, multiple planner/controller plugins, ROS tooling, and production
 monitoring matter.
@@ -476,6 +522,46 @@ A scene therefore contains three aligned representations:
 2. An inflated 2-D occupancy/traversability grid for this planner.
 3. An optional 3DGS PLY for photorealistic RGB.
 
+`SceneLoader` keeps these assets independent from the robot. The scene manifest
+uses `external_mjcf` for a scene-only MJCF fragment, or `collision_mesh` for a
+raw static collision mesh. At startup the loader attaches those assets to the
+unchanged G1 MJCF with MuJoCo `MjSpec`, validates the result, and gives the
+simulator a temporary composed model. Nothing is copied into or edited inside
+the SONIC/G1 repository.
+
+```json
+{
+  "external_mjcf": "../assets/scenes/apartment/scene.xml",
+  "collision_mesh": null,
+  "gaussian_splat": "/data/apartment/point_cloud.ply",
+  "navigation_grid": "apartment_grid.json",
+  "semantic_map": "apartment_locations.json"
+}
+```
+
+For a raw mesh, `collision_mesh` may instead be an object containing `path`,
+`scale`, `position`, and a MuJoCo `wxyz` `quaternion`. A splat alone supplies
+RGB but no contact surface; pair it with aligned MJCF/mesh collision geometry
+and a grid. This makes swapping a ProcTHOR/MolmoSpaces MJCF, a reconstructed
+mesh, or a splat-plus-mesh bundle a manifest change rather than a robot-model
+change.
+
+For the DISCOVERSE lab3 example, the occupancy layer is derived from the splat
+itself. Gaussian centers between 0.18 m and 1.4 m above the aligned floor are
+accumulated into 10 cm cells; dense cells become obstacles and are inflated by
+the G1 footprint before A*. Rebuild the checked-in derived map with:
+
+```bash
+../GR00T-WholeBodyControl/.venv_sim/bin/python \
+  scripts/build_splat_navigation_grid.py \
+  --scene examples/sim_scene.json \
+  --output examples/lab3_splat_navigation_grid.json
+```
+
+This provides planning collision constraints from the scan, but Gaussian
+ellipsoids are still visual—not MuJoCo contact shapes. Add aligned MJCF
+geometry when physical obstacle contact is required.
+
 `examples/sim_scene.json` is the manifest and includes a `world_T_gs`-style 4x4
 alignment field. Replace its `gaussian_splat` value with a PLY path and pass a
 named MJCF head camera:
@@ -493,3 +579,96 @@ renderer. A splat reconstructed from video must be metrically aligned, and a
 collision mesh or authored MuJoCo geometry must still be supplied separately.
 
 - [MuGS](https://github.com/Renforce-Dynamics/MuGS)
+
+## Nested visual manipulation agent
+
+`ManipulationModule` can expose one blocking `manipulate(instruction, reason)`
+tool backed by `AgenticManipulationBackend`. The outer System-2 mission agent
+does not micromanage a grasp. A separate `NestedManipulationAgent` repeatedly:
+
+1. receives fresh head, left-wrist, and right-wrist frames plus proprioception;
+2. selects one bounded Cartesian hand delta or Dex1 aperture command;
+3. executes it through a `ManipulationEmbodiment` implemented by the robot/WBC;
+4. observes again and continues until the embodiment independently verifies
+   completion or the nested agent returns a safe failure.
+
+This is an Inspect-Robots-style policy/embodiment boundary. A frontier VLM can
+be the policy, but its 1-3 Hz tool loop is not the balance controller. SONIC
+continues running at its native control rate while the nested agent supplies
+sparse, collision-gated end-effector intent.
+`WbcCartesianManipulationEmbodiment` connects this loop to robot-class's
+CAP-X-compatible `get_current_wrist_pose`, `goto_pose`, `set_gripper`, and
+head/wrist camera APIs.
+
+`SonicUpperBodyControlApi` executes accepted IK solutions through the upstream
+planner message's native 17-DOF `upper_body_position` and
+`upper_body_velocity` fields. It maps robot-class's 29-joint MuJoCo ordering to
+SONIC's interleaved IsaacLab ordering, interpolates each accepted target, and
+ends with a zero-velocity hold. Dex1 aperture remains a separately bounded
+robot-class command. This supports standing manipulation and simultaneous
+upper-body references during walking; it does not bypass IK, collision checks,
+joint limits, or SONIC's high-rate stabilization.
+
+## Importing SimFoundry scenes into MuJoCo
+
+`SimFoundryMuJoCoImporter` reads the published SimFoundry saved-scene JSON
+without modifying its USD assets. It converts USD/PLY geometry into a generated
+OBJ cache, preserves object pose, scale, mass and friction, creates free MuJoCo
+bodies for interactable props, applies the authored support plane, emits a
+semantic object map, and turns occupied navigation cells into conservative
+invisible collision proxies. A separately aligned 3DGS PLY remains the
+photorealistic visual background.
+
+```bash
+python -m venv .venv_scene_import
+pip install -e '.[scene-import]'
+
+PYTHONPATH=src .venv_scene_import/bin/python \
+  -m system2_agent.simfoundry_importer \
+  assets/simfoundry/assets/scenes/YAM/stack_dishware/stack_dishware_scene_state_latest.json \
+  assets/generated/lab3_simfoundry_dishware \
+  --gaussian-splat ../MuGS/assets/scenes/discoverse_unpacked/lab3/point_cloud.ply \
+  --gaussian-alignment-json examples/sim_scene.json \
+  --navigation-grid examples/lab3_splat_navigation_grid.json \
+  --without-background-mesh \
+  --scene-offset -1.15 -0.25 0.77
+```
+
+The generated manifest is
+`assets/generated/lab3_simfoundry_dishware/scene_bundle.json`. It combines the
+Lab3 splat, physical navigation collisions, a finite tabletop support surface,
+and SimFoundry's plate, bowl and mug as separate rigid bodies. Lab3 and the YAM
+workcell are different captures, so this is a compositor/physics diagnostic,
+not a coherent scene and not a valid visual benchmark. SimFoundry's
+currently published examples use mesh backgrounds; its automatic splat
+background release is still pending. The importer intentionally accepts an
+metric 3DGS layer only when its registration belongs to the same capture.
+
+## Coherent bounded indoor scene
+
+The prepared InteriorGS scene uses its matching Gaussian and Habitat navmesh in
+one coordinate frame. Build a deterministic 300k-Gaussian LOD and conservative
+MuJoCo collision layer without running CUDA:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 timeout 60s \
+  .venv_scene_import/bin/python scripts/import_habitat_gs_indoor.py \
+  assets/scenes/habitat_gs/train/interior_0048_839893 \
+  assets/generated/interior_0048_coherent \
+  --max-gaussians 300000 \
+  --initial-pose X Y YAW
+```
+
+The importer centers the immutable scene transform on a high-clearance cell in
+the largest connected region and never edits the source scene. Geometric clearance
+does not prove that a Gaussian reconstruction is visually complete. Probe the
+candidate spawn and destinations, then pass the verified pose through
+`--initial-pose`; the manifest records whether it was operator-verified. Runtime
+checks reject a spawn outside the navigable component or without footprint
+clearance, and the simulator persists it through MuJoCo resets.
+
+InteriorGS is a navigation asset: visible furniture is baked into the splat and
+is not independently movable. Manipulation requires rigid props reconstructed
+and registered from the same room (for example a SimFoundry capture) or a
+coherent rigid-object scene such as ReplicaCAD. Treating pixels from a splat as
+free bodies would produce the floating-object error this architecture forbids.

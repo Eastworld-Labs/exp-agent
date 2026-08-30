@@ -57,39 +57,73 @@ class ManipulationModule:
         self.requires_approval = requires_approval
 
     def tools(self) -> Sequence[Tool]:
-        return (
+        tools: list[Tool] = [
             Tool(
                 name="inspect_workspace",
                 description="Observe manipulation-relevant objects, surfaces, and gripper state.",
                 parameters=object_schema({}),
                 handler=lambda _: dict(self.backend.observe()),
-            ),
-            Tool(
-                name="pick_object",
-                description=(
-                    "Ask the manipulation backend to pick a named visible object. The backend "
-                    "owns grasp selection, collision checking, whole-body motion, and verification."
+            )
+        ]
+        manipulate = getattr(self.backend, "manipulate", None)
+        if manipulate is not None:
+            tools.append(
+                Tool(
+                    name="manipulate",
+                    description=(
+                        "Run a blocking nested visual manipulation agent. It repeatedly observes "
+                        "head/wrist cameras and issues bounded WBC arm/gripper commands until the "
+                        "instruction is verified complete or safely fails."
+                    ),
+                    parameters=object_schema(
+                        {"instruction": {"type": "string"}, "reason": {"type": "string"}},
+                        ["instruction", "reason"],
+                    ),
+                    handler=lambda args: manipulate(str(args["instruction"])),
+                    kind="action",
+                    requires_approval=self.requires_approval,
+                )
+            )
+        else:
+            tools.extend(
+                (
+                    Tool(
+                        name="pick_object",
+                        description=(
+                            "Ask the manipulation backend to pick a named visible object. The "
+                            "backend owns grasp selection, collision checking, whole-body motion, "
+                            "and verification."
+                        ),
+                        parameters=object_schema(
+                            {
+                                "object": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            ["object", "reason"],
+                        ),
+                        handler=lambda args: self.backend.pick(str(args["object"])),
+                        kind="action",
+                        requires_approval=self.requires_approval,
+                    ),
+                    Tool(
+                        name="place_object",
+                        description=(
+                            "Place the currently held object on or in a named visible target."
+                        ),
+                        parameters=object_schema(
+                            {
+                                "target": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            ["target", "reason"],
+                        ),
+                        handler=lambda args: self.backend.place(str(args["target"])),
+                        kind="action",
+                        requires_approval=self.requires_approval,
+                    ),
                 ),
-                parameters=object_schema(
-                    {"object": {"type": "string"}, "reason": {"type": "string"}},
-                    ["object", "reason"],
-                ),
-                handler=lambda args: self.backend.pick(str(args["object"])),
-                kind="action",
-                requires_approval=self.requires_approval,
-            ),
-            Tool(
-                name="place_object",
-                description="Place the currently held object on or in a named visible target.",
-                parameters=object_schema(
-                    {"target": {"type": "string"}, "reason": {"type": "string"}},
-                    ["target", "reason"],
-                ),
-                handler=lambda args: self.backend.place(str(args["target"])),
-                kind="action",
-                requires_approval=self.requires_approval,
-            ),
-        )
+            )
+        return tuple(tools)
 
     def snapshot(self) -> Json:
         return dict(self.backend.observe())

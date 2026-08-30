@@ -104,7 +104,7 @@ class System2Agent:
                     events=tuple(events),
                 )
 
-            if tool is not None and tool.kind == "action":
+            if tool is not None and (tool.kind == "action" or tool.refresh_world):
                 messages.append(
                     {
                         "role": "user",
