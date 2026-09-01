@@ -29,12 +29,6 @@ not duplicate its G1, MuJoCo, SONIC variant, checkpoint, or reference-protocol
 implementations. It adds the mission agent, semantic modules, global planning,
 and the navigation-specific target-velocity planner adapter.
 
-For the physical G1, bare `UnitreeG1Config()` selects the guarded external
-SONIC 1.1 deploy contract by default. Simulator-only kinematic adapters are
-explicitly labelled test paths; policy-faithful MuJoCo and Isaac runs use the
-same SONIC 1.1 reference contract through `robot_class`. Controller selection
-never implies automatic hardware activation.
-
 ## Design goals
 
 - Small enough to read in an afternoon.
