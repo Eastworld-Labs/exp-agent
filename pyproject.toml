@@ -23,6 +23,11 @@ scene-import = [
   "plyfile>=1.1",
   "usd-core>=25",
 ]
+isaac = [
+  "isaacsim[all,extscache]>=6.0,<7; platform_system == 'Linux' and python_version >= '3.12'",
+  "numpy>=1.24",
+  "pillow>=10",
+]
 
 [project.scripts]
 exp-agent = "system2_agent.cli:main"

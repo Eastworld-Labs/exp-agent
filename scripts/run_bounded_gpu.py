@@ -50,12 +50,19 @@ def _cpu_temperature() -> float | None:
 def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
-    os.killpg(process.pid, signal.SIGTERM)
+    # Give Python rollouts a chance to flush videos, telemetry, and child
+    # simulator processes. SIGTERM bypasses normal ``finally`` cleanup unless
+    # every target installs a handler explicitly.
+    os.killpg(process.pid, signal.SIGINT)
     try:
-        process.wait(timeout=8)
+        process.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
 
 
 def main() -> int:

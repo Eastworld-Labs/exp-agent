@@ -38,12 +38,30 @@ def pack_sonic_command(*, start: bool, stop: bool, planner: bool = True) -> byte
     """Use robot_class's canonical command protocol implementation."""
     try:
         from robot.sonic_token import pack_sonic_command_message
-    except ImportError as exc:
-        raise ImportError(
-            "SONIC integration requires robot_class; install the 'sonic' extra "
-            "or place the robot_class checkout on PYTHONPATH"
-        ) from exc
-    return pack_sonic_command_message(start=start, stop=stop, planner=planner)
+    except ImportError:
+        # Isaac Sim's Python environment intentionally does not install all of
+        # robot_class's camera/service extras. Keep the exact canonical wire
+        # format available so the simulator bridge remains isolated.
+        fields = [
+            ("start", "u8", [1], struct.pack("B", 1 if start else 0)),
+            ("stop", "u8", [1], struct.pack("B", 1 if stop else 0)),
+            ("planner", "u8", [1], struct.pack("B", 1 if planner else 0)),
+        ]
+        header = {
+            "v": 4,
+            "endian": "le",
+            "count": 1,
+            "fields": [
+                {"name": name, "dtype": dtype, "shape": shape}
+                for name, dtype, shape, _ in fields
+            ],
+        }
+        encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
+        return b"command" + encoded.ljust(HEADER_SIZE, b"\0") + b"".join(
+            value for _, _, _, value in fields
+        )
+    else:
+        return pack_sonic_command_message(start=start, stop=stop, planner=planner)
 
 
 def pack_sonic_planner(
@@ -103,12 +121,13 @@ class SonicZmqBase:
             raise ImportError("SonicZmqBase needs pyzmq: pip install -e '.[sonic]'") from exc
         try:
             from robot.sonic_variants import normalize_sonic_variant
-        except ImportError as exc:
-            raise ImportError(
-                "SONIC integration requires robot_class; install the 'sonic' extra "
-                "or place the robot_class checkout on PYTHONPATH"
-            ) from exc
-        self.sonic_variant = normalize_sonic_variant(sonic_variant)
+        except ImportError:
+            aliases = {"v1.1": "sonic_v1_1", "v1_1": "sonic_v1_1", "sonic-v1-1": "sonic_v1_1"}
+            self.sonic_variant = aliases.get(sonic_variant, sonic_variant)
+            if self.sonic_variant not in {"v1", "low_latency", "sonic_v1_1"}:
+                raise ValueError(f"unknown SONIC variant {sonic_variant!r}")
+        else:
+            self.sonic_variant = normalize_sonic_variant(sonic_variant)
         if self.sonic_variant == "auto":
             raise ValueError("SonicZmqBase requires a resolved SONIC variant")
         self._pose_provider = pose_provider

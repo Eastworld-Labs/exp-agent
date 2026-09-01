@@ -21,8 +21,8 @@ The model decides **what capability to invoke**. It never produces joint torques
 foot contacts, or raw base velocities. Real-time behavior remains in conventional
 or learned robot controllers.
 
-The default CLI is dry-run only. Separate simulation CLIs connect to MuJoCo, and
-the SONIC bridge is opt-in; nothing targets physical hardware by default.
+The default CLI is dry-run only. The simulation CLI selects MuJoCo or Isaac Sim,
+and the SONIC bridge is opt-in; nothing targets physical hardware by default.
 
 `robot_class` is the shared embodiment/controller layer. This repository does
 not duplicate its G1, MuJoCo, SONIC variant, checkpoint, or reference-protocol
@@ -135,6 +135,14 @@ This is for semantic inspection and mission decisions, not for producing
 control-rate velocity commands.
 
 ## The System-2 loop
+
+`System2Agent` depends only on the exported `ChatModel` protocol—not on a
+provider SDK or simulator. Any tool-capable text/vision model can be used by
+implementing `complete(messages, tools) -> AssistantTurn`. The included
+`OpenAICompatibleModel` covers OpenAI, Gemini, DeepSeek, local compatible
+servers, and Claude through OpenRouter; a native-provider adapter can implement
+the same protocol without changing the agent, tools, navigation, manipulation,
+SONIC, or either simulator backend.
 
 `System2Agent.run()` keeps a linear conversation:
 
@@ -353,13 +361,116 @@ third-party packages:
 PYTHONPATH=src python -m unittest discover -s tests
 ```
 
+## Selectable MuJoCo and Isaac Sim environments
+
+The simulation entry point and Python factory accept either backend while keeping
+the System-2 modules, semantic map, global planner, local-observer contract, and
+tool calls unchanged:
+
+```bash
+# Lightweight/default backend
+exp-agent-sim --backend mujoco --scene examples/sim_scene.json \
+  --goal "kitchen table"
+
+# RTX/PhysX backend; run from Isaac Sim's Python 3.12 environment
+exp-agent-sim --backend isaac --scene /data/office/scene_bundle.json \
+  --goal "west room"
+```
+
+The same choice is available when embedding the agent:
+
+```python
+from system2_agent.scene_bundle import SceneBundle
+from system2_agent.sim import create_simulation_environment
+
+scene = SceneBundle.from_json("/data/office/scene_bundle.json")
+environment = create_simulation_environment(
+    "isaac", scene, workspace="/home/robot/workspace", with_vision=True
+)
+```
+
+An Isaac-capable scene bundle adds a backend-specific block alongside the common
+navigation grid and semantic map:
+
+```json
+{
+  "navigation_grid": "navigation_grid.json",
+  "semantic_map": "semantic_locations.json",
+  "initial_pose": {"x": 0, "y": 0, "yaw": 0},
+  "isaac_sim": {
+    "stage_usd": "interactive_office.usdz",
+    "robot_usd": "/data/robots/g1.usd",
+    "robot_prim": "/World/G1",
+    "renderer": "RaytracedLighting",
+    "cameras": [
+      {
+        "label": "g1_head_rgb",
+        "prim_path": "/World/G1/head_camera",
+        "width": 640,
+        "height": 480
+      },
+      {
+        "label": "g1_left_wrist_rgb",
+        "prim_path": "/World/G1/left_wrist_camera"
+      }
+    ]
+  }
+}
+```
+
+The environment USD/USDZ stage owns RTX materials, lights, native Gaussian-splat
+prims, and PhysX rigid/articulated objects. `robot_usd` is optional: when the G1
+prim is not already in the environment stage, it is referenced at `robot_prim` at
+runtime without modifying either source asset. The splat remains appearance;
+collision meshes, rigid bodies, mass, friction, and joints remain physics. This
+prevents a visible table from silently being treated as a contact surface.
+
+By default, `IsaacSimBase` moves the G1 root kinematically for fast System-2 and
+navigation evaluation and identifies itself as `isaac-sim-kinematic-velocity`.
+It pauses PhysX during that render-only mode so an uncontrolled articulation does
+not fall, and it must not be reported as learned locomotion or object-interaction
+performance. Pass an `IsaacVelocityActuator` (SONIC, a perceptive locomotion
+controller, or another policy bridge) to enable PhysX and execute the same bounded
+velocity intents through real simulated dynamics. Interactive-object manipulation
+likewise needs the existing nested manipulation module connected to an Isaac
+arm/WBC control API; merely loading a rigid object does not command a grasp.
+
+Configured Isaac cameras provide occasional RGB frames to the System-2/VLM loop.
+The first camera also supplies a separate depth-based local obstacle observer at
+navigation control rate. That observer can be replaced by nvblox/ESDF or a learned
+perceptive controller without changing `navigate_to`.
+
+For recorded indoor routes, the third-person camera is selected from close
+rear-quarter candidates whose sight lines are free in the navigation grid. It
+falls back to an overhead view rather than rendering through a wall. Gaussian
+LOD generation is deterministic and record-stratified: it deliberately avoids
+global raw-opacity ranking because real PLY exports may contain saturated or
+infinite opacity logits that otherwise consume the LOD budget and remove most
+of the scene.
+
+SimFoundry's native application runtime is OmniGibson on Omniverse/PhysX. Its USD
+objects and Gaussian USDZ background can therefore be assembled/exported as the
+Isaac stage above. Alternatively, its saved-scene JSON can continue through the
+included MuJoCo importer. The semantic map and navigation grid are deliberately
+external to both physics formats.
+
+Isaac Sim is an optional, large NVIDIA runtime. Install `.[isaac]` in a supported
+Linux Python 3.12 environment or run the package with an existing Isaac Sim
+`python.sh`. Merely installing the base `exp-agent` package does not start or load
+Isaac. Its first launch may require the operator to review and accept NVIDIA's
+Omniverse license; the agent does not accept licenses automatically.
+
 ## Included G1 simulation stack
 
-There are two deliberately distinct paths:
+There are three deliberately distinct paths:
 
 ```text
 Fast integration test
 System-2 -> semantic goal -> smooth trajectory planner -> body velocity -> robot_class MuJoCo G1
+
+Photorealistic environment evaluation
+System-2 -> shared map/tools -> Isaac USD/USDZ + RTX cameras + local depth
+          -> kinematic root or optional perceptive/SONIC actuator -> PhysX
 
 Policy-faithful sim2sim (Linux + NVIDIA GPU)
 System-2 -> semantic goal -> smooth trajectory planner -> SONIC planner ZMQ command

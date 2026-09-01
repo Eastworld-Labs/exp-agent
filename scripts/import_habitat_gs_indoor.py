@@ -14,6 +14,23 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 
 
+def representative_lod_indices(count: int, maximum: int) -> np.ndarray:
+    """Return deterministic record-stratified indices without opacity bias.
+
+    Some production 3DGS PLYs contain saturated ``+inf`` opacity logits. A
+    global top-opacity selection can then spend almost the complete LOD budget
+    on those records and erase finite-opacity scene structure. Stratification
+    preserves the source distribution and spatial coverage (3DGS writers
+    commonly emit nearby records together) while keeping memory bounded.
+    """
+    if maximum <= 0:
+        raise ValueError("max_gaussians must be positive")
+    if count <= maximum:
+        return np.arange(count, dtype=np.int64)
+    edges = np.linspace(0, count, maximum + 1, dtype=np.float64)
+    return np.floor((edges[:-1] + edges[1:]) * 0.5).astype(np.int64)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("scene_directory", type=Path)
@@ -152,14 +169,7 @@ def main() -> None:
     }, indent=2) + "\n")
 
     lod = output / f"{stem}.lod{args.max_gaussians}.gs.ply"
-    if len(vertex) <= args.max_gaussians:
-        selected = vertex
-    elif "opacity" in vertex.dtype.names:
-        index = np.argpartition(vertex["opacity"], -args.max_gaussians)[-args.max_gaussians:]
-        selected = vertex[index]
-    else:
-        index = np.linspace(0, len(vertex) - 1, args.max_gaussians, dtype=int)
-        selected = vertex[index]
+    selected = vertex[representative_lod_indices(len(vertex), args.max_gaussians)]
     PlyData([PlyElement.describe(selected, "vertex")], text=False).write(str(lod))
 
     # Generate conservative wall proxies. The source GS/navmesh remains immutable.

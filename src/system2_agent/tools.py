@@ -72,7 +72,11 @@ class ToolRegistry:
         return state
 
     def world_content(self, heading: str) -> list[Json]:
-        """Build OpenAI-compatible multimodal content for the current world state."""
+        """Build provider-neutral multimodal content for the current world state.
+
+        Model adapters translate this compact text/image representation to a
+        provider's native request format when it is not OpenAI-compatible.
+        """
         content: list[Json] = [
             {"type": "text", "text": f"{heading}\n{_json(self.snapshot())}"}
         ]
