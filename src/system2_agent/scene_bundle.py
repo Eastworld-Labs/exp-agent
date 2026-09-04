@@ -13,6 +13,15 @@ class IsaacCameraSpec:
     prim_path: str
     width: int = 640
     height: int = 480
+    #: When set, the runtime defines the camera prim itself under this parent
+    #: (a robot link such as ``/World/G1/torso_link``) if the stage lacks it:
+    #: at ``mount_xyz`` in the link frame, looking along the link's +X pitched
+    #: down by ``pitch_down_deg``, with ``horizontal_fov_deg`` of view. The
+    #: defaults are the G1's RealSense bracket and a D455's field of view.
+    mount_prim: str | None = None
+    mount_xyz: tuple[float, float, float] = (0.0576235, 0.01753, 0.42987)
+    pitch_down_deg: float = 0.0
+    horizontal_fov_deg: float = 87.0
 
 
 @dataclass(frozen=True)
@@ -130,17 +139,35 @@ class SceneBundle:
         for item in value.get("cameras", []):
             if not isinstance(item, dict):
                 raise ValueError("each isaac_sim camera must be an object")
+            mount = item.get("mount")
+            if mount is not None and not isinstance(mount, dict):
+                raise ValueError("Isaac camera mount must be an object")
+            mount = mount or {}
             try:
                 camera = IsaacCameraSpec(
                     label=str(item["label"]),
                     prim_path=str(item["prim_path"]),
                     width=int(item.get("width", 640)),
                     height=int(item.get("height", 480)),
+                    mount_prim=None if mount.get("prim") is None else str(mount["prim"]),
+                    mount_xyz=tuple(float(v) for v in mount.get("xyz", (0.0576235, 0.01753, 0.42987))),
+                    pitch_down_deg=float(mount.get("pitch_down_deg", 0.0)),
+                    horizontal_fov_deg=float(mount.get("hfov_deg", 87.0)),
                 )
             except KeyError as exc:
                 raise ValueError("Isaac camera requires label and prim_path") from exc
             if not camera.prim_path.startswith("/"):
                 raise ValueError("Isaac camera prim paths must be absolute")
+            if len(camera.mount_xyz) != 3:
+                raise ValueError("Isaac camera mount.xyz needs three numbers")
+            if camera.mount_prim is not None and not camera.prim_path.startswith(
+                camera.mount_prim.rstrip("/") + "/"
+            ):
+                raise ValueError(
+                    "a mounted Isaac camera's prim_path must be a child of mount.prim"
+                )
+            if not 0 < camera.horizontal_fov_deg < 180:
+                raise ValueError("Isaac camera mount.hfov_deg must be in (0, 180)")
             if not camera.label:
                 raise ValueError("Isaac camera labels must not be empty")
             if camera.width <= 0 or camera.height <= 0:

@@ -25,6 +25,13 @@ from .navigation_core import (
 from .scene_bundle import SceneBundle
 from .scene_loader import SceneLoader
 from .sim import ZmqJpegCamera
+from .sim.g1_mujoco import MuJoCoHeadCamera
+from .sim.head_camera import HeadCameraBackend, HeadCameraStream
+from .sim_cli import (
+    add_head_camera_arguments,
+    frame_publisher_from_args,
+    head_camera_from_args,
+)
 from .sonic_bridge import SonicZmqBase
 
 
@@ -59,6 +66,7 @@ def main() -> None:
     parser.add_argument("--navigation-timeout", type=float, default=180.0)
     parser.add_argument("--realtime", action="store_true", default=True)
     parser.add_argument("--check", action="store_true")
+    add_head_camera_arguments(parser)
     args = parser.parse_args()
 
     repo = args.groot_wbc.expanduser().resolve()
@@ -118,7 +126,8 @@ def main() -> None:
     wbc_config = cfg.load_wbc_yaml()
     wbc_config["ENV_NAME"] = cfg.env_name
     robot_scene = repo / wbc_config["ROBOT_SCENE"]
-    loaded_physics = SceneLoader(robot_scene).load(scene)
+    head_camera = head_camera_from_args(args)
+    loaded_physics = SceneLoader(robot_scene).load(scene, head_camera=head_camera)
     wbc_config["ROBOT_SCENE"] = str(loaded_physics.model_path)
     # Keep the upstream support available during deploy's three-second posture
     # ramp. It is released before navigation, so locomotion remains untethered.
@@ -159,9 +168,30 @@ def main() -> None:
     if args.record is not None:
         wrapper.sim.sim_env.mj_model.vis.global_.offwidth = args.record_width
         wrapper.sim.sim_env.mj_model.vis.global_.offheight = args.record_height
-    if args.with_vision:
+    if args.with_vision and head_camera is None:
         wrapper.sim.start_image_publish_subprocess(cfg.mp_start_method, cfg.camera_port)
     wrapper.sim.start_as_thread()
+    head_stream = None
+    publisher = frame_publisher_from_args(args)
+    if publisher is not None:
+        assert head_camera is not None
+        # Renders the composed model's head camera from its own thread while
+        # the upstream sim thread steps -- the same arrangement as the video
+        # recorder below, which upstream already relies on.
+        head_stream = HeadCameraStream(
+            MuJoCoHeadCamera(
+                wrapper.sim.sim_env.mj_model, wrapper.sim.sim_env.mj_data, spec=head_camera
+            ),
+            publisher,
+            hz=args.stream_hz,
+            source="sim:sonic",
+        )
+        head_stream.start()
+        print(
+            f"[head camera] streaming to {publisher.broker} as {publisher.robot_id}; "
+            f"dashboard: ?robot={publisher.robot_id}",
+            flush=True,
+        )
 
     def sim_pose() -> Pose3D:
         qpos = wrapper.sim.sim_env.mj_data.qpos
@@ -364,7 +394,18 @@ def main() -> None:
             NavigationModule(semantic, navigation, requires_approval=False),
         ]
         if args.with_vision:
-            camera = ZmqJpegCamera(camera="ego_view")
+            if head_camera is not None:
+                # The robot's own two previews, colour then range, as the
+                # mission service shows them on hardware.
+                camera = HeadCameraBackend(
+                    MuJoCoHeadCamera(
+                        wrapper.sim.sim_env.mj_model,
+                        wrapper.sim.sim_env.mj_data,
+                        spec=head_camera,
+                    )
+                )
+            else:
+                camera = ZmqJpegCamera(camera="ego_view")
             modules.append(CameraModule(camera))
         model = OpenAICompatibleModel.from_env(
             args.model, base_url=args.base_url, api_key_env=args.api_key_env
@@ -375,6 +416,9 @@ def main() -> None:
         if recorder is not None:
             recorder.close()
             print(json.dumps(recorder.summary(), indent=2))
+        if head_stream is not None:
+            head_stream.close()
+            print(json.dumps({"head_camera_stream": head_stream.summary()}, indent=2))
         if camera is not None:
             camera.close()
         bridge.close()

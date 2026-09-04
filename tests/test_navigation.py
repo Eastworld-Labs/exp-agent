@@ -15,7 +15,7 @@ from system2_agent.navigation_core import (
     SmoothTrajectoryPlanner,
     VelocityCommand,
 )
-from system2_agent.sonic_bridge import pack_sonic_planner, slew_heading
+from system2_agent.sonic_bridge import pack_sonic_command, pack_sonic_planner, slew_heading
 from system2_agent.sim.g1_mujoco import G1MuJoCoBase
 
 
@@ -334,3 +334,77 @@ class NavigationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SonicWireConformanceTests(unittest.TestCase):
+    """⚠️ THIS MODULE'S SONIC PACKER IS A DELIBERATE COPY.
+
+    robot_class owns the SONIC ZMQ wire format (`robot/sonic_token.py`). This
+    tree carries its own because `sonic_bridge` runs inside Isaac Sim's Python,
+    which does not have robot_class or its dependencies -- and a third copy
+    lives in g1_auto_navigation's ROS container for the same kind of reason.
+
+    A copy nobody compares is a copy that drifts, and the drift would be
+    SILENT: the deployer matches fields by name at a fixed 1280-byte offset, so
+    a divergence does not fail to parse. It produces a plausible planner
+    command from misaligned bytes, on a balancing biped.
+
+    So whenever robot_class is importable, compare the bytes. Run it from a
+    machine that has both checkouts:
+
+        PYTHONPATH=src:../robot_class ../robot_class/.venv/bin/python \\
+          -m unittest tests.test_navigation
+
+    THE VECTORS ARE SHARED, verbatim, with robot_class's
+    tests/test_sonic_planner.py and g1_auto_navigation's
+    src/g1_hardware/test/test_sonic_protocol.py. Add to one, add to all three.
+    """
+
+    PLANNER_VECTORS = (
+        dict(mode=1, movement=(1.0, 0.0, 0.0), facing=(0.0, 1.0, 0.0), speed=0.4),
+        dict(mode=0, movement=(0.0, 0.0, 0.0), facing=(1.0, 0.0, 0.0), speed=-1.0),
+        dict(mode=0, movement=(0.0, 0.0, 0.0), facing=(1.0, 0.0, 0.0), speed=0.0),
+        dict(mode=2, movement=(0.0, 1.0, 0.0), facing=(1.0, 0.0, 0.0), speed=0.3, height=0.5),
+        dict(
+            mode=1,
+            movement=(0.6, 0.8, 0.0),
+            facing=(0.7071, 0.7071, 0.0),
+            speed=0.5,
+            upper_body_position=tuple(float(index) for index in range(17)),
+            upper_body_velocity=(0.0,) * 17,
+        ),
+        dict(mode=7, movement=(0.0, 1.0, 0.0), facing=(1.0, 0.0, 0.0), speed=0.3, height=0.5),
+    )
+    COMMAND_VECTORS = tuple(
+        dict(start=bool(s), stop=bool(t), planner=bool(p))
+        for s in (0, 1) for t in (0, 1) for p in (0, 1)
+    )
+
+    def canonical(self):
+        try:
+            # ⚠️ try/except rather than find_spec: `robot` is importable as a
+            # NAME long before it imports successfully -- the package pulls in
+            # OpenCV, msgpack and pyzmq at import time -- so only actually
+            # importing it answers the question.
+            import robot.sonic_token as canonical
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"robot_class not importable here: {exc}")
+        return canonical
+
+    def test_planner_bytes_match_robot_class(self):
+        canonical = self.canonical()
+        for vector in self.PLANNER_VECTORS:
+            with self.subTest(vector=vector):
+                self.assertEqual(
+                    pack_sonic_planner(**vector),
+                    canonical.pack_sonic_planner_message(**vector),
+                )
+
+    def test_command_bytes_match_robot_class(self):
+        canonical = self.canonical()
+        for vector in self.COMMAND_VECTORS:
+            with self.subTest(vector=vector):
+                self.assertEqual(
+                    pack_sonic_command(**vector),
+                    canonical.pack_sonic_command_message(**vector),
+                )

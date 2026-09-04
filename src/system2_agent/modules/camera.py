@@ -25,9 +25,16 @@ class CameraModule:
 
     name = "cameras"
 
-    def __init__(self, backend: CameraBackend) -> None:
+    def __init__(self, backend: CameraBackend, *, max_looks: int | None = None) -> None:
         self.backend = backend
         self._last_labels: list[str] = []
+        # ⚠️ A BUDGET, BECAUSE IMAGES ARE THE ONE THING THAT GROWS A
+        # CONVERSATION WITHOUT BOUND. Every look adds a frame to the transcript
+        # and every later turn re-sends all of them, so a model that answers
+        # uncertainty by looking again turns a mission into an upload. The cap
+        # is a refusal the model can read and plan around, not a silent drop.
+        self.max_looks = max_looks
+        self.looks = 0
 
     def tools(self) -> Sequence[Tool]:
         return (
@@ -38,13 +45,26 @@ class CameraModule:
                     "Use this when local visual context is needed without moving the robot."
                 ),
                 parameters=object_schema({}),
-                handler=lambda _: {"state": "fresh_frames_requested"},
+                handler=self._observe,
                 refresh_world=True,
             ),
         )
 
+    def _observe(self, _arguments: object) -> Json:
+        if self.max_looks is not None and self.looks >= self.max_looks:
+            raise ValueError(
+                f"no looks left: {self.max_looks} camera observations is the budget "
+                f"for one mission. Decide from what you have already seen, or call "
+                f"request_human if you cannot."
+            )
+        self.looks += 1
+        return {"state": "fresh_frames_requested"}
+
     def snapshot(self) -> Json:
-        return {"last_frame_labels": self._last_labels}
+        snapshot: Json = {"last_frame_labels": self._last_labels}
+        if self.max_looks is not None:
+            snapshot["looks_left"] = max(0, self.max_looks - self.looks)
+        return snapshot
 
     def prompt_content(self) -> list[Json]:
         frames = list(self.backend.capture())

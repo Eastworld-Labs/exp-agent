@@ -64,13 +64,34 @@ class NavigationModule:
             Tool(
                 name="navigate_to",
                 description=(
-                    "Navigate to a named semantic location. The navigation backend, not the "
-                    "LLM, plans and tracks the path."
+                    "WALKS THE ROBOT to a named semantic location, and does not return "
+                    "until it has arrived or failed. The navigation backend -- not you -- "
+                    "plans the path, avoids obstacles and tracks it; you choose the "
+                    "destination. Read the whole result before deciding anything: it says "
+                    "whether the robot arrived, and whether that is the planner's own "
+                    "verdict or an inference from where the robot ended up."
                 ),
                 parameters=object_schema(
                     {
-                        "location": {"type": "string"},
-                        "reason": {"type": "string"},
+                        # ⚠️ THE ENUM IS THE REFUSAL, MADE STRUCTURAL. Built from
+                        # the loaded semantic map at schema time, so a
+                        # destination nobody labelled cannot be emitted rather
+                        # than being caught after the fact -- and on a provider
+                        # with strict tool schemas it is impossible, not merely
+                        # invalid. An empty map yields an empty enum, which is
+                        # the honest shape: there is nowhere to go.
+                        "location": {
+                            "type": "string",
+                            "enum": self.map.names(),
+                            "description": "A destination from the semantic map.",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": (
+                                "Why the robot should go there now, in one sentence. "
+                                "An operator reads this before approving the step."
+                            ),
+                        },
                     },
                     ["location", "reason"],
                 ),

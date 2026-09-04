@@ -15,6 +15,7 @@ from .navigation_core import (
 )
 from .scene_bundle import SceneBundle
 from .sim import create_simulation_environment
+from .sim.head_camera import SIM_ROBOT_ID, HeadCameraSpec, MqttFramePublisher
 
 
 def main() -> None:
@@ -33,7 +34,11 @@ def main() -> None:
     parser.add_argument("--with-vision", action="store_true")
     parser.add_argument("--splat", type=Path, help="Override scene's 3DGS PLY and use MuGS")
     parser.add_argument(
-        "--viewer", action="store_true", help="Show the Isaac Sim window (Isaac backend only)"
+        "--viewer",
+        action="store_true",
+        help="Show the simulator window: MuJoCo's passive viewer, or the Isaac Sim "
+        "window. Pair it with --realtime, otherwise the mission finishes faster "
+        "than it can be watched.",
     )
     parser.add_argument(
         "--no-local-depth",
@@ -42,6 +47,7 @@ def main() -> None:
     )
     parser.add_argument("--realtime", action="store_true")
     parser.add_argument("--max-model-calls", type=int, default=30)
+    add_head_camera_arguments(parser)
     args = parser.parse_args()
     if bool(args.goal) == bool(args.mission):
         parser.error("provide exactly one of --goal or --mission")
@@ -51,6 +57,8 @@ def main() -> None:
     scene = SceneBundle.from_json(args.scene)
     semantic_map = SemanticMapModule.from_json(scene.semantic_map)
     grid = GridMap.from_json(scene.navigation_grid)
+    head_camera = head_camera_from_args(args)
+    publisher = frame_publisher_from_args(args)
     environment = create_simulation_environment(
         args.backend,
         scene,
@@ -60,7 +68,16 @@ def main() -> None:
         splat=args.splat,
         headless=not args.viewer,
         isaac_local_depth=not args.no_local_depth,
+        head_camera=head_camera,
+        stream=publisher,
+        stream_hz=args.stream_hz,
     )
+    if publisher is not None:
+        print(
+            f"[head camera] streaming to {publisher.broker} as {publisher.robot_id}; "
+            f"dashboard: ?robot={publisher.robot_id}",
+            flush=True,
+        )
     base = environment.base
     try:
         if scene.initial_pose is not None:
@@ -102,6 +119,66 @@ def main() -> None:
         print(json.dumps(outcome.__dict__, indent=2, default=list))
     finally:
         environment.close()
+        if environment.stream is not None:
+            print(json.dumps({"head_camera_stream": environment.stream.summary()}, indent=2))
+
+
+def add_head_camera_arguments(parser: argparse.ArgumentParser) -> None:
+    """Flags shared by the simulation CLIs for the G1's head depth camera."""
+    group = parser.add_argument_group("head camera")
+    group.add_argument(
+        "--no-head-camera",
+        action="store_true",
+        help="Do not attach the D455-like head depth camera to the robot",
+    )
+    group.add_argument(
+        "--head-pitch-deg",
+        type=float,
+        default=0.0,
+        help="Pitch the head camera down this many degrees (0 = facing forward; "
+        "the real G1 bracket is about 48)",
+    )
+    group.add_argument(
+        "--stream-mqtt",
+        metavar="HOST[:PORT]",
+        help="Publish the head camera's colour and range previews to this MQTT "
+        "broker as the sim robot, on the topics the dashboard already watches",
+    )
+    group.add_argument(
+        "--robot-id",
+        default=SIM_ROBOT_ID,
+        help="Robot id (and MQTT username) to publish as; open the dashboard "
+        f"with ?robot=<id>. Default {SIM_ROBOT_ID}",
+    )
+    group.add_argument("--stream-hz", type=float, default=6.0, help="Preview rate")
+
+
+def head_camera_from_args(args: argparse.Namespace) -> HeadCameraSpec | None:
+    if args.no_head_camera:
+        if args.stream_mqtt:
+            raise SystemExit("--stream-mqtt needs the head camera; drop --no-head-camera")
+        return None
+    return HeadCameraSpec(pitch_down_deg=args.head_pitch_deg)
+
+
+def parse_broker(value: str, default_port: int = 1883) -> tuple[str, int]:
+    """``HOST[:PORT]`` -> (host, port)."""
+    host, separator, port = value.strip().rpartition(":")
+    if not separator:
+        host, port = port, ""
+    if not host:
+        raise ValueError("broker host must not be empty")
+    try:
+        return host, int(port) if port else default_port
+    except ValueError as exc:
+        raise ValueError(f"broker port must be an integer: {value!r}") from exc
+
+
+def frame_publisher_from_args(args: argparse.Namespace) -> MqttFramePublisher | None:
+    if not args.stream_mqtt:
+        return None
+    host, port = parse_broker(args.stream_mqtt)
+    return MqttFramePublisher(broker=host, port=port, robot_id=args.robot_id)
 
 
 if __name__ == "__main__":

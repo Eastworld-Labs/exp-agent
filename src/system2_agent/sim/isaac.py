@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import io
 import math
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..modules.camera import CameraFrame
@@ -14,6 +16,43 @@ from ..navigation_core import (
     VelocityCommand,
 )
 from ..scene_bundle import IsaacCameraSpec, IsaacSimScene
+from .head_camera import D455, HeadCameraFrame, HeadCameraSpec, mask_depth
+
+
+@dataclass(frozen=True)
+class DepthFrame:
+    """One depth image plus the camera model needed to place its pixels in the world.
+
+    ``depth`` is an HxW array of distance to the image plane (range along the
+    optical axis) in metres. ``fx``/``fy``/``cx``/``cy`` are pixel intrinsics
+    for that resolution. ``rotation`` (3x3, row-major) and ``position`` are the
+    pose of the camera's *optical* frame -- +X right, +Y down, +Z forward -- in
+    the same world frame the runtime reports the robot pose in.
+    """
+
+    depth: Any
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    rotation: tuple[tuple[float, float, float], ...]
+    position: tuple[float, float, float]
+
+
+def rotation_from_quaternion(
+    quaternion: Sequence[float],
+) -> tuple[tuple[float, float, float], ...]:
+    """Row-major rotation matrix for a (w, x, y, z) quaternion."""
+    w, x, y, z = (float(value) for value in quaternion)
+    norm = math.sqrt(w * w + x * x + y * y + z * z)
+    if not norm or not math.isfinite(norm):
+        raise ValueError("quaternion must be finite and non-zero")
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
+    return (
+        (1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)),
+        (2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)),
+        (2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)),
+    )
 
 
 class IsaacRuntime(Protocol):
@@ -29,7 +68,7 @@ class IsaacRuntime(Protocol):
 
     def rgb(self) -> Sequence[tuple[str, Any]]: ...
 
-    def depth(self) -> Any: ...
+    def depth_frame(self) -> DepthFrame: ...
 
     def close(self) -> None: ...
 
@@ -59,6 +98,9 @@ class IsaacSimBase:
         self.runtime = runtime
         self.actuator = actuator
         self.runtime.set_physics_enabled(actuator is not None)
+        #: Called after every step, on the stepping thread. Kit renders only
+        #: from the thread that drives it, so the head camera stream ticks here.
+        self.step_hooks: list[Callable[[], None]] = []
 
     @property
     def name(self) -> str:
@@ -83,6 +125,7 @@ class IsaacSimBase:
         if self.actuator is not None:
             self.actuator.command_velocity(command, dt)
             self.runtime.step(dt)
+            self._after_step()
             return
         pose = self.pose()
         c, s = math.cos(pose.yaw), math.sin(pose.yaw)
@@ -98,6 +141,11 @@ class IsaacSimBase:
             )
         )
         self.runtime.step(dt)
+        self._after_step()
+
+    def _after_step(self) -> None:
+        for hook in list(self.step_hooks):
+            hook()
 
     def stop(self) -> None:
         if self.actuator is not None:
@@ -135,8 +183,43 @@ class IsaacCameraBackend:
         return frames
 
 
+class IsaacHeadCamera:
+    """Colour and metric depth from the runtime's head camera (its first camera).
+
+    Must be used from the thread driving the Kit app, which is why the stream
+    that consumes it ticks from ``IsaacSimBase.step_hooks``.
+    """
+
+    def __init__(self, runtime: IsaacRuntime, *, spec: HeadCameraSpec = D455, clock: Any = time.time) -> None:
+        self.runtime = runtime
+        self.spec = spec
+        self._clock = clock
+
+    def capture(self) -> HeadCameraFrame:
+        import numpy as np
+
+        frames = list(self.runtime.rgb())
+        if not frames:
+            raise RuntimeError("Isaac runtime has no camera to capture from")
+        rgb = np.asarray(frames[0][1], dtype=np.uint8)
+        depth = np.asarray(self.runtime.depth_frame().depth, dtype=np.float32)
+        return HeadCameraFrame(rgb, mask_depth(depth, self.spec), float(self._clock()))
+
+    def close(self) -> None:
+        return None
+
+
 class IsaacDepthObserver:
-    """Conservative robot-relative obstacle observation from the head depth image.
+    """Robot-relative obstacle observation from the head depth image.
+
+    Every depth pixel is back-projected with the camera intrinsics and placed in
+    the world with the camera pose, so the floor is rejected by its height
+    rather than by where it happens to fall in the image. A head camera pitched
+    towards the ground therefore does not report the floor as an obstacle. What
+    remains is the nearest return inside the robot's forward body corridor that
+    lies between ``min_obstacle_height_m`` and ``max_obstacle_height_m`` above
+    the floor at ``ground_z_m``. Anything lower than the minimum height counts
+    as floor, so kerbs and steps are a job for terrain perception, not this.
 
     This is a safety/local-navigation input, independent of the slower VLM RGB
     loop. A learned perceptive controller or an nvblox/ESDF adapter can replace
@@ -149,39 +232,92 @@ class IsaacDepthObserver:
         *,
         maximum_obstacle_distance_m: float = 1.25,
         obstacle_radius_m: float = 0.22,
-        corridor_fraction: float = 0.35,
+        corridor_half_width_m: float = 0.35,
+        ground_z_m: float = 0.0,
+        min_obstacle_height_m: float = 0.15,
+        max_obstacle_height_m: float = 2.0,
     ) -> None:
         if maximum_obstacle_distance_m <= 0 or obstacle_radius_m < 0:
             raise ValueError("depth observer distances must be non-negative")
-        if not 0 < corridor_fraction <= 1:
-            raise ValueError("corridor_fraction must be in (0, 1]")
+        if corridor_half_width_m <= 0:
+            raise ValueError("corridor_half_width_m must be positive")
+        if not math.isfinite(ground_z_m):
+            raise ValueError("ground_z_m must be finite")
+        if not 0 <= min_obstacle_height_m < max_obstacle_height_m:
+            raise ValueError("obstacle heights must satisfy 0 <= min < max")
         self.runtime = runtime
         self.maximum_obstacle_distance_m = maximum_obstacle_distance_m
         self.obstacle_radius_m = obstacle_radius_m
-        self.corridor_fraction = corridor_fraction
+        self.corridor_half_width_m = corridor_half_width_m
+        self.ground_z_m = ground_z_m
+        self.min_obstacle_height_m = min_obstacle_height_m
+        self.max_obstacle_height_m = max_obstacle_height_m
 
     def observe(self, pose: Pose3D) -> LocalNavigationObservation:
         try:
             import numpy as np
 
-            depth = np.asarray(self.runtime.depth(), dtype=np.float32)
+            frame = self.runtime.depth_frame()
+            depth = np.asarray(frame.depth, dtype=np.float32)
             if depth.ndim != 2 or not depth.size:
                 raise ValueError("depth image must be a non-empty HxW array")
-            half = max(1, round(depth.shape[1] * self.corridor_fraction / 2))
-            center = depth.shape[1] // 2
-            # Ignore sky/ceiling and the bottom floor-heavy region. This is a
-            # forward body corridor, not a generic closest-pixel detector.
-            row_start = round(depth.shape[0] * 0.15)
-            row_stop = max(row_start + 1, round(depth.shape[0] * 0.75))
-            corridor = depth[
-                row_start:row_stop, max(0, center - half) : center + half
-            ]
-            valid = corridor[np.isfinite(corridor) & (corridor > 0)]
-            if not valid.size:
+            intrinsics = (frame.fx, frame.fy, frame.cx, frame.cy)
+            if (
+                not all(math.isfinite(value) for value in intrinsics)
+                or frame.fx <= 0
+                or frame.fy <= 0
+            ):
+                raise ValueError(
+                    "depth camera intrinsics must be finite with positive focal lengths"
+                )
+            rotation = np.asarray(frame.rotation, dtype=np.float64)
+            position = np.asarray(frame.position, dtype=np.float64)
+            if rotation.shape != (3, 3) or position.shape != (3,):
+                raise ValueError(
+                    "depth camera pose needs a 3x3 rotation and a 3-vector position"
+                )
+            if not (np.isfinite(rotation).all() and np.isfinite(position).all()):
+                raise ValueError("depth camera pose must be finite")
+
+            valid = np.isfinite(depth) & (depth > 0)
+            if not valid.any():
                 raise ValueError("depth image contains no finite positive range")
-            # A low percentile rejects isolated invalid/edge pixels while still
-            # reacting to a meaningful object in the forward corridor.
-            distance = float(np.percentile(valid, 5.0))
+            rows, cols = np.nonzero(valid)
+            z = depth[rows, cols].astype(np.float64)
+            # Pixel centres sit half a pixel past the index; the principal point
+            # is expressed in the same continuous pixel coordinates.
+            x = (cols + 0.5 - frame.cx) / frame.fx * z
+            y = (rows + 0.5 - frame.cy) / frame.fy * z
+            world = np.stack((x, y, z), axis=-1) @ rotation.T + position
+
+            # Reject the floor by height, not by image row: a pitched camera
+            # puts the floor anywhere in the frame, and at any range.
+            height = world[:, 2] - self.ground_z_m
+            above_floor = height >= self.min_obstacle_height_m
+            body = above_floor & (height <= self.max_obstacle_height_m)
+
+            c, s = math.cos(pose.yaw), math.sin(pose.yaw)
+            dx = world[:, 0] - pose.x
+            dy = world[:, 1] - pose.y
+            forward = dx * c + dy * s
+            left = -dx * s + dy * c
+            corridor = (
+                body & (forward > 0) & (np.abs(left) <= self.corridor_half_width_m)
+            )
+            counts = (
+                f"floor_px={int(np.count_nonzero(~above_floor))} "
+                f"body_px={int(np.count_nonzero(body))} "
+                f"corridor_px={int(np.count_nonzero(corridor))}"
+            )
+            if corridor.any():
+                # A low percentile rejects isolated invalid/edge pixels while
+                # still reacting to a meaningful object in the forward corridor.
+                distance = float(np.percentile(forward[corridor], 5.0))
+                near = corridor & (forward <= distance + self.obstacle_radius_m)
+                lateral = float(np.median(left[near]))
+            else:
+                distance = math.inf
+                lateral = 0.0
         except Exception as exc:
             return LocalNavigationObservation(
                 source="isaac_head_depth",
@@ -193,8 +329,8 @@ class IsaacDepthObserver:
         if distance <= self.maximum_obstacle_distance_m:
             obstacles = (
                 LocalObstacle(
-                    pose.x + distance * math.cos(pose.yaw),
-                    pose.y + distance * math.sin(pose.yaw),
+                    pose.x + distance * c - lateral * s,
+                    pose.y + distance * s + lateral * c,
                     self.obstacle_radius_m,
                     "head_depth_forward",
                 ),
@@ -203,7 +339,7 @@ class IsaacDepthObserver:
             source="isaac_head_depth",
             obstacles=obstacles,
             frame=pose.frame,
-            detail=f"forward_range_m={distance:.3f}",
+            detail=f"forward_range_m={distance:.3f} {counts}",
         )
 
 
@@ -271,6 +407,8 @@ class OmniverseIsaacRuntime:
             self._physics_hz = physics_hz
             self._cameras: list[tuple[IsaacCameraSpec, Any]] = []
             for spec in scene.cameras:
+                if not is_prim_path_valid(spec.prim_path) and spec.mount_prim is not None:
+                    self._define_mounted_camera(spec, is_prim_path_valid)
                 if not is_prim_path_valid(spec.prim_path):
                     raise ValueError(
                         f"Isaac camera prim does not exist in the stage: {spec.prim_path}"
@@ -288,6 +426,46 @@ class OmniverseIsaacRuntime:
         except Exception:
             self._app.close()
             raise
+
+    @staticmethod
+    def _define_mounted_camera(spec: IsaacCameraSpec, is_prim_path_valid: Any) -> None:
+        """Author a head camera prim under a robot link, D455-shaped by default.
+
+        USD cameras share MuJoCo's convention (-Z forward, +Y up), so the same
+        quaternion places both. The focal length is chosen for the spec's
+        horizontal FOV at the default 20.955 mm aperture; the vertical aperture
+        follows the resolution's aspect so pixels stay square.
+        """
+        import omni.usd
+        from pxr import Gf, UsdGeom
+
+        assert spec.mount_prim is not None
+        if not is_prim_path_valid(spec.mount_prim):
+            raise ValueError(
+                f"Isaac camera mount prim does not exist in the stage: {spec.mount_prim}"
+            )
+        head = HeadCameraSpec(
+            name=spec.label,
+            width=spec.width,
+            height=spec.height,
+            horizontal_fov_deg=spec.horizontal_fov_deg,
+            mount_xyz=spec.mount_xyz,
+            pitch_down_deg=spec.pitch_down_deg,
+        )
+        stage = omni.usd.get_context().get_stage()
+        camera = UsdGeom.Camera.Define(stage, spec.prim_path)
+        aperture = 20.955
+        camera.CreateFocalLengthAttr(float(head.usd_focal_length_mm(aperture)))
+        camera.CreateHorizontalApertureAttr(aperture)
+        camera.CreateVerticalApertureAttr(float(head.usd_vertical_aperture_mm(aperture)))
+        camera.CreateClippingRangeAttr(Gf.Vec2f(0.05, 100.0))
+        # Mount offsets are metres; the stage may not be.
+        per_metre = 1.0 / float(UsdGeom.GetStageMetersPerUnit(stage) or 1.0)
+        xform = UsdGeom.Xformable(camera)
+        xform.ClearXformOpOrder()
+        xform.AddTranslateOp().Set(Gf.Vec3d(*(value * per_metre for value in head.mount_xyz)))
+        w, x, y, z = head.mujoco_quat()
+        xform.AddOrientOp().Set(Gf.Quatf(float(w), float(x), float(y), float(z)))
 
     def pose(self) -> Pose3D:
         position, quaternion = self._root.get_world_pose()
@@ -329,14 +507,29 @@ class OmniverseIsaacRuntime:
             frames.append((spec.label, image[:, :, :3].copy()))
         return frames
 
-    def depth(self) -> Any:
+    def depth_frame(self) -> DepthFrame:
         if not self._cameras:
             raise RuntimeError("Isaac scene has no camera configured for depth")
+        import numpy as np
+
         self._app.update()
-        depth = self._cameras[0][1].get_depth()
+        _, camera = self._cameras[0]
+        depth = camera.get_depth()
         if depth is None:
             raise RuntimeError("Isaac head camera has no depth frame")
-        return depth.copy()
+        intrinsics = np.asarray(camera.get_intrinsics_matrix(), dtype=np.float64)
+        # Isaac's "ros" camera axes are the optical convention the observer
+        # back-projects in: +X right, +Y down, +Z forward.
+        position, quaternion = camera.get_world_pose(camera_axes="ros")
+        return DepthFrame(
+            depth=depth.copy(),
+            fx=float(intrinsics[0, 0]),
+            fy=float(intrinsics[1, 1]),
+            cx=float(intrinsics[0, 2]),
+            cy=float(intrinsics[1, 2]),
+            rotation=rotation_from_quaternion(quaternion),
+            position=tuple(float(value) for value in position),
+        )
 
     def close(self) -> None:
         if self._closed:

@@ -29,6 +29,68 @@ not duplicate its G1, MuJoCo, SONIC variant, checkpoint, or reference-protocol
 implementations. It adds the mission agent, semantic modules, global planning,
 and the navigation-specific target-velocity planner adapter.
 
+## Driving a real G1: the host mission service
+
+`system2_agent/g1/` runs this agent as a small service beside the
+[g1_auto_navigation](../g1_auto_navigation) stack's MQTT broker, so an operator
+can type "go to kitchen" in the dashboard and the robot walks there.
+
+```text
+webui chatbox / ./g1 mission ──HTTP+SSE──> exp-agent-g1 serve   (this machine)
+                                             System2Agent
+                                             semantic_map + navigate_to
+                                                 │ CBOR/MQTT: /goal_pose
+                                                 ▼
+                              the robot's fleet agent -> goal_relay -> Nav2
+                              -> /cmd_vel -> collision monitor -> the legs
+```
+
+```bash
+pip install -e '.[g1]'
+exp-agent-g1 serve --nav-dir ../g1_auto_navigation \
+                   --env-file ../g1_auto_navigation/webui/.env.local
+exp-agent-g1 run "go to kitchen"                 # the real robot; approves each step
+exp-agent-g1 run --robot sim "go to kitchen_2"   # the SONIC simulator
+```
+
+Normally nothing above is typed: the dashboard's dev server starts the service
+itself when it is not answering (`MISSION_AUTOSTART=0` turns that off), and the
+dashboard's **Send on a mission** control is its client.
+
+**One service, two targets.** The real robot (`g1-0001`) and the SONIC simulator
+on the workstation (`g1-sim-0001`) are two robot ids on the same broker. The
+service opens one link per target at startup, plans the sim over its own map
+(`maps/procthor_val_0.places.json`) and reads the sim's pose off ground-truth
+`/odom` because it has no localizer. Every request names its robot; unnamed means
+the real one. One mission at a time across both, refused with a 409 that says
+which robot the running one is on.
+
+Three properties are worth stating because they are load-bearing rather than
+incidental:
+
+- **The agent chooses a destination, never a velocity.** The service's link
+  refuses to publish any topic outside a one-entry table, so `/cmd_vel` and
+  `/estop` are unreachable from a tool call by construction rather than by
+  prompt. Everything between the goal and the motors — costmaps, obstacle
+  avoidance, recovery behaviours, the collision monitor — stays on the robot.
+- **Destinations come from the map the robot is actually localized against.**
+  `maps/<map>.places.json` is read against `maps/.map_active.json`, and a
+  document describing a different map refuses every destination instead of
+  walking confidently to the wrong building. `navigate_to`'s `location` is an
+  `enum` built from that file, so a hallucinated place cannot be emitted.
+- **Arrival is labelled.** Nav2's own verdict arrives on `/goal_status` when the
+  robot publishes it; otherwise arrival is inferred from the pose converging on
+  the goal — which cannot tell an abort from a slow walk. Every result carries
+  `verdict_source` saying which one it was.
+- **Retained heartbeats are aged, not trusted.** `/estop_state` and
+  `/sonic/enabled` are retained on the broker and heartbeated at 2 Hz. A value
+  older than six beats reads as "nobody is saying", so a `/sonic/enabled: false`
+  left behind by last week's SONIC session cannot refuse every goal on a robot
+  now walking on Unitree's gait.
+
+`--gate dry-run` publishes nothing at all and needs no robot; it is how a prompt
+change gets exercised for free.
+
 ## Design goals
 
 - Small enough to read in an afternoon.
@@ -436,9 +498,23 @@ likewise needs the existing nested manipulation module connected to an Isaac
 arm/WBC control API; merely loading a rigid object does not command a grasp.
 
 Configured Isaac cameras provide occasional RGB frames to the System-2/VLM loop.
+A camera entry may carry a `mount` block -- `{"prim": "/World/G1/torso_link",
+"xyz": [0.0576, 0.0175, 0.4299], "pitch_down_deg": 0, "hfov_deg": 87}` -- in
+which case the runtime authors the camera prim under that link with a D455's
+optics when the stage does not already have it; the first camera is the head
+camera, and with the default head-camera spec the model sees its colour and
+range previews (`HeadCameraBackend`) rather than every camera's RGB.
 The first camera also supplies a separate depth-based local obstacle observer at
-navigation control rate. That observer can be replaced by nvblox/ESDF or a learned
-perceptive controller without changing `navigate_to`.
+navigation control rate. It back-projects every depth pixel with the camera's
+intrinsics and world pose, discards returns within 0.15 m of the floor or more
+than 2 m above it, and reports the nearest remaining return inside the robot's
+forward body corridor. Because the floor is rejected by height rather than by a
+fixed band of image rows, a head camera pitched towards the ground does not
+report the floor as an obstacle. The stage's floor is assumed to lie at z=0;
+pass `IsaacDepthObserver(runtime, ground_z_m=...)` for scenes authored
+otherwise. Anything lower than 0.15 m counts as floor, so kerbs and steps are a
+job for terrain perception. The observer can be replaced by nvblox/ESDF or a
+learned perceptive controller without changing `navigate_to`.
 
 For recorded indoor routes, the third-person camera is selected from close
 rear-quarter candidates whose sight lines are free in the navigation grid. It
@@ -480,13 +556,72 @@ System-2 -> semantic goal -> smooth trajectory planner -> SONIC planner ZMQ comm
 
 The fast path is runnable in the current workspace and is useful for agent, map,
 planner, camera, and failure-recovery development. It moves the floating base
-kinematically; it must not be used to claim locomotion-policy performance:
+kinematically; it must not be used to claim locomotion-policy performance.
+
+Even this path needs the G1 MJCF from the official stack: `create_simulation_environment`
+loads `../GR00T-WholeBodyControl/gear_sonic/data/robot_model/model_data/g1/scene_43dof.xml`.
+That file exists only on the **`gear-sonic`** branch -- `main` ships
+`decoupled_wbc/control/robot_model/...` instead and the MuJoCo backend will not
+start against it. The meshes are Git LFS, so `git lfs` must be installed before
+the clone or MuJoCo fails to parse the pointer files:
+
+```bash
+sudo apt-get install -y git-lfs && git lfs install
+git clone --depth 1 --branch gear-sonic \
+  https://github.com/NVlabs/GR00T-WholeBodyControl.git ../GR00T-WholeBodyControl
+```
 
 ```bash
 cd exp-agent
 PYTHONPATH=src:../robot_class ../robot_class/.venv/bin/python \
   -m system2_agent.sim_cli --goal "kitchen table"
 ```
+
+`scene_43dof.xml` defines no MuJoCo cameras of its own. The scene loader
+therefore attaches the G1's head depth camera (below) to the robot at load
+time, so `--with-vision` shows the model that camera by default and
+`--splat`/MuGS can render from it as `--camera head_d455`. Pass `--camera` to
+use some other named camera, or `--no-head-camera` to leave the model as
+shipped. Headless rendering needs `MUJOCO_GL=egl`.
+
+### The head depth camera
+
+Every simulator here carries the same forward-facing head depth camera the
+real G1 has -- a RealSense D455-shaped one: 87 x 56 degree field of view at
+640 x 360, at the RealSense bracket on `torso_link`, level rather than the
+hardware bracket's 48-degree downward pitch (`--head-pitch-deg` tilts it).
+`system2_agent.sim.head_camera` owns it:
+
+- `HeadCameraSpec` / `D455` describe placement and optics; `SceneLoader`
+  attaches the camera to a MuJoCo robot, and an Isaac scene bundle camera with
+  a `mount` block is authored under a robot link by the runtime (see below).
+- `MuJoCoHeadCamera` and `IsaacHeadCamera` render colour plus metric depth,
+  with returns outside the sensor's 0.4-10 m working range reported as no
+  return, as a depth camera would.
+- `HeadCameraBackend` gives the model the robot's own two previews under the
+  labels the mission service uses -- `head_colour`, then `head_range`, the
+  false-colour range image with its legend burned in -- so a mission prompt
+  that works on hardware sees the same evidence in simulation.
+- `HeadCameraStream` publishes those previews and the vision node's health JSON
+  on the robot's topics (`/g1/d435c/preview/compressed`,
+  `/g1/d435c/preview_depth/compressed`, `/object_grounding_status`) as CBOR
+  over MQTT, byte-for-byte the shape the fleet agent produces.
+
+```bash
+# Stream the sim's head camera to the dashboard's broker as the sim robot:
+exp-agent-sim --backend mujoco --goal "kitchen table" --stream-mqtt 127.0.0.1:1883
+# then open the dashboard as  http://<host>:5173/?robot=g1-sim-0001
+```
+
+The stream connects as MQTT username `g1-sim-0001` (`--robot-id`), because the
+broker's ACL only lets a `g1-*` username publish telemetry under its own id.
+##### That is the same identity a fleet agent for that robot id would use;
+never point the stream at a broker while the real robot of the same id is on
+it. A mission service that should see the simulated camera needs
+`G1_ROBOT_ID=g1-sim-0001` and `MISSION_CAMERA=1`; nothing else changes. Frames
+go out at `--stream-hz` (6 by default), are never retained and never re-sent,
+so a frozen picture on the dashboard means the simulator stopped, exactly as
+it means the camera stopped on the robot.
 
 To let a frontier VLM choose the semantic navigation tool and inspect fresh
 MuJoCo frames:
@@ -543,7 +678,17 @@ PYTHONPATH=src:../robot_class:../GR00T-WholeBodyControl \
   -m system2_agent.official_sonic_sim_cli \
   --mission "go to the charging station and verify the scene" \
   --model openai/YOUR_TOOL_AND_VISION_MODEL --with-vision
+
+# ... and stream that head camera to the dashboard while it runs:
+PYTHONPATH=src:../robot_class:../GR00T-WholeBodyControl \
+  ../GR00T-WholeBodyControl/.venv_sim/bin/python \
+  -m system2_agent.official_sonic_sim_cli \
+  --goal "charging station" --stream-mqtt BROKER_HOST:1883
 ```
+
+With the head camera attached (the default), `--with-vision` shows the model
+the D455 head camera's colour and range previews instead of GEAR-SONIC's
+`ego_view` ZMQ stream; `--no-head-camera` restores the upstream camera.
 
 SONIC v1.1 is a 50 Hz whole-body motion tracker. NVIDIA's target-velocity
 kinematic planner supplies its reference animation. The navigation backend uses
@@ -582,6 +727,116 @@ or ESDF adapter as `local_observer`; the interface is present and tested, but RG
 images alone are not treated as metric collision geometry. Nav2 MPPI, nvblox,
 X-Mobility, or another local controller can replace the regulated follower behind
 the same `navigate_to(location, reason)` tool.
+
+### Walking up to something the robot can see: `local_planner`
+
+`navigate_to` can only reach places somebody labelled, so "go to the sink" has
+nowhere to go: a sink is not a place. `local_planner(target, reason)` is the
+second stage, and it never opens the semantic map.
+
+```text
+"go to the sink"
+  navigate_to("pantry")            a labelled place, Nav2, as before
+  observe_surroundings()           is the sink actually in frame?
+  local_planner("sink")            grounds it, measures it, walks up to it
+```
+
+Inside one call: a fresh `head_colour` frame goes to a small vision model that
+returns one bounding box or refuses; the box is measured against the robot's
+metric depth frame (30th percentile inside the middle 60% of the box, so the
+object's face wins over the background past its silhouette); the point is placed
+in the frame of the robot's pose **at that instant**; a standoff pose is put
+0.6 m short of it on the line from the robot, pulled back until it is somewhere
+the robot could stand; A\* on the Nav2 local costmap proves a path exists; and
+the pose is handed to the same `NavigationBackend.navigate()` that `navigate_to`
+uses, so every pre-flight refusal (E-stop latched, not localized, SONIC
+disarmed) applies unchanged.
+
+**The model names a noun.** It never sees a cell, a coordinate or a velocity,
+and the tool's schema has no place to put one. Everything metric happens inside
+the call, where it is checked against the costmap before a byte is published.
+
+**How close it will go, and why that number is not the one you asked for.** Every
+standoff here is measured from `base_footprint`'s centre, and the G1's measured
+footprint reaches **0.31 m** in front of that origin — so a 0.60 m standoff is
+0.29 m of clear air, and a "0.30 m standoff" would put the object *inside the
+robot*. Missions should therefore ask for `clearance_m`, the gap a person would
+measure, and let the planner convert:
+
+| ask | goal sent | gap you see | at worst-case arrival |
+| --- | --- | --- | --- |
+| `clearance_m: 0.29` (the floor) | 0.60 m | 0.29 m | 0.19 m |
+| `clearance_m: 0.5` | 0.81 m | 0.50 m | 0.40 m |
+| `standoff_m: 0.3` | *refused* | −0.01 m | the robot standing on it |
+
+The floor is **derived, not chosen**: `StopZone` (0.40 m) + Nav2's arrival box
+(0.10 m) + 0.10 m of margin = 0.60 m. `StopZone` halts the robot with nothing in
+any log and is the only guard that reads `/scan` directly, so a goal the checker
+could latch inside it is a walk that stops for no visible reason. Because the
+floor is derived, the arrival box is configuration
+(`MISSION_LOCAL_ARRIVAL_BOX_M`) and must mirror Nav2's `xy_goal_tolerance` — 0.10
+under Unitree's gait, 0.25 under SONIC, which cannot creep into a tighter box.
+Under SONIC the floor rises to 0.75 m on its own rather than promising a
+clearance the backend cannot deliver; the worst-case body clearance is 0.19 m
+either way.
+
+⚠️ **0.29 m is where the robot can STAND, not how well it can see.** This G1
+stack has no arm control (the prompt says so to the model), so the standoff is
+the whole approach: there is no reaching step to close the last stretch. What
+0.29 m buys is a head camera whose floor coverage starts at ~0.48 m still having
+the object in frame on arrival, which is what makes the approach verifiable.
+
+**One call is often one leg.** The local costmap is a rolling window a few
+metres across while the camera sees across a room, so a distant target is
+clamped to the longest leg that fits inside both the window and the walk budget,
+and the result says `reached_standoff: false` with the metres remaining. The
+model looks at the fresh frame and calls again. Each leg re-grounds on a new
+picture, which is also how an approach survives the target being half-occluded
+at the start. Two brakes stop that loop from running away: a budget of legs per
+mission, and a check that the measured range actually shrank — a robot that is
+no closer than last time is not approaching anything, and the tool says so
+rather than walking the same leg again.
+
+Ranging prefers metric depth and falls back to the costmap. The two topics the
+robot publishes for it are new:
+
+| topic | payload |
+| --- | --- |
+| `/g1/head/depth/compressed` | `sensor_msgs/CompressedImage`, `format: "16UC1; png"` — 16-bit PNG of **millimetres**, 0 meaning no return, downsampled to 320 px wide, in the colour camera's pixel grid |
+| `/g1/head/depth_info` | `std_msgs/String`, retained JSON — `width, height, fx, fy, cx, cy, depth_scale, frame_id, camera, source` |
+
+⚠️ **The intrinsics travel with the pixels and both are required.** The publisher
+downsamples before sending, so the sensor's own `fx` is the wrong number and only
+the publisher knows the right one. A frame that arrives without a model is
+dropped rather than ranged against an assumption. Decoding needs no new
+dependency: `system2_agent.png16` reads 16-bit greyscale PNG with `zlib` alone.
+
+⚠️ **Aligned depth, in the colour grid.** "The box is at (u, v), so the range is
+`depth[v][u]`" is only true because the driver resamples depth into the colour
+camera's grid. Raw depth is a different imager a baseline away, and indexing it
+with a colour-frame box is wrong by a parallax that grows as the object gets
+closer — which is exactly the regime this tool works in.
+
+Without depth on the link the tool ranges by casting the pixel's bearing into the
+local costmap until a lethal cell, and says `method: "costmap_raycast"` in the
+result. That cannot tell the target from anything else on the same bearing, so a
+chair in between yields a shorter, safer standoff — which is also how "get as
+close as you can" behaves when something is in the way: the goal is placed
+against the **blocker**, not the target, and then pulled back until the body
+fits. `pulled_back_m` and `achieved_standoff_m` in the result say how much the
+costmap took, and `body_clearance_m` says what the robot actually ended up with.
+A target the obstacle layers never marked (glass, a thin rail) is a refusal
+rather than a guess. When depth
+does answer, the ray-cast still runs as a cross-check and disagreement beyond
+0.5 m is reported.
+
+The simulator publishes both topics through `HeadCameraStream`, from the same
+capture as the previews, so a mission that works in the SONIC sim sees the same
+wire on hardware. `exp-agent-g1 local-check` prints the costmap, the depth
+status and an ASCII picture of the grid with the robot on it, and can dry-run a
+goal placement for a given bearing and range — read-only, no model call, nothing
+published. Configuration lives in `.env.example` under `MISSION_LOCAL_*` and
+`MISSION_GROUNDING_*`.
 
 The official deploy build requires Ubuntu, CUDA and the exact supported
 TensorRT version. It cannot be built or policy-tested on macOS. The lightweight

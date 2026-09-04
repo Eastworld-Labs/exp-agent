@@ -5,7 +5,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from .types import AssistantTurn, Json, ToolCall
 
@@ -23,6 +23,14 @@ class OpenAICompatibleModel:
     api_key: str
     timeout_s: float = 120.0
     temperature: float | None = None
+    # ⚠️ NO max_tokens IS SENT UNLESS THIS IS SET, and that is deliberate: a
+    # limit low enough to truncate a tool call produces the failure mode
+    # agent.turn_fault exists for. Set it only when a provider requires it.
+    max_tokens: int | None = None
+    # Provider-specific request fields (OpenRouter's `reasoning`/`usage`, say).
+    # Merged UNDER the standard keys -- see complete().
+    extra_body: Json | None = None
+    extra_headers: Mapping[str, str] | None = None
 
     @classmethod
     def from_env(
@@ -61,14 +69,23 @@ class OpenAICompatibleModel:
         return cls(model=resolved_model, base_url=resolved_url, api_key=key)
 
     def complete(self, messages: Sequence[Json], tools: Sequence[Json]) -> AssistantTurn:
-        payload: Json = {
+        payload: Json = {}
+        # Provider-specific extras first, so the four keys below can never be
+        # overridden by them: `messages` and `tools` are the conversation this
+        # agent built, and a caller that could replace them could replace the
+        # tool set a physical action is gated on.
+        if self.extra_body:
+            payload.update(self.extra_body)
+        payload.update({
             "model": self.model,
             "messages": list(messages),
             "tools": list(tools),
             "tool_choice": "auto",
-        }
+        })
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
 
         request = urllib.request.Request(
             f"{self.base_url.rstrip('/')}/chat/completions",
@@ -76,6 +93,7 @@ class OpenAICompatibleModel:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                **dict(self.extra_headers or {}),
             },
             method="POST",
         )
@@ -87,7 +105,8 @@ class OpenAICompatibleModel:
             raise RuntimeError(f"model HTTP {exc.code}: {detail}") from exc
 
         try:
-            message = body["choices"][0]["message"]
+            choice = body["choices"][0]
+            message = choice["message"]
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"unexpected model response: {body}") from exc
 
@@ -105,4 +124,33 @@ class OpenAICompatibleModel:
                     arguments=arguments,
                 )
             )
-        return AssistantTurn(content=message.get("content") or "", tool_calls=tuple(calls))
+        finish_reason = choice.get("finish_reason")
+        details = tuple(message.get("reasoning_details") or ())
+        return AssistantTurn(
+            content=message.get("content") or "",
+            tool_calls=tuple(calls),
+            finish_reason=str(finish_reason) if finish_reason else None,
+            reasoning=str(message.get("reasoning") or "") or _reasoning_text(details),
+            reasoning_details=details,
+            usage=body.get("usage") or None,
+        )
+
+
+def _reasoning_text(details: Sequence[Json]) -> str:
+    """Flatten provider reasoning blocks into something readable.
+
+    ⚠️ NEVER the `encrypted` variant. Some providers return reasoning as an
+    opaque blob that exists to be echoed back, not read; rendering it would put
+    a wall of base64 in front of an operator who is deciding whether to let a
+    robot walk.
+    """
+    parts = []
+    for block in details:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "reasoning.encrypted":
+            continue
+        text = block.get("text") or block.get("summary") or ""
+        if text:
+            parts.append(str(text))
+    return "\n".join(parts)

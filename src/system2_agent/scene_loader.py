@@ -3,8 +3,10 @@ from __future__ import annotations
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .scene_bundle import SceneBundle
+from .sim.head_camera import HeadCameraSpec
 
 
 @dataclass
@@ -33,7 +35,8 @@ class SceneLoader:
     collision mesh is attached with MuJoCo's MjSpec API, validated, and written
     into a private temporary directory for the simulator to load. Gaussian
     splats stay in SceneBundle as a render layer and do not masquerade as
-    collision geometry.
+    collision geometry. A head depth camera can be attached the same way, so a
+    robot MJCF that ships without cameras still gets the D455 the real G1 has.
     """
 
     def __init__(self, robot_scene: str | Path) -> None:
@@ -41,8 +44,10 @@ class SceneLoader:
         if not self.robot_scene.exists():
             raise FileNotFoundError(f"robot MJCF does not exist: {self.robot_scene}")
 
-    def load(self, scene: SceneBundle) -> LoadedPhysicsScene:
-        if scene.mujoco_xml is None and scene.collision_mesh is None:
+    def load(
+        self, scene: SceneBundle, *, head_camera: HeadCameraSpec | None = None
+    ) -> LoadedPhysicsScene:
+        if scene.mujoco_xml is None and scene.collision_mesh is None and head_camera is None:
             return LoadedPhysicsScene(self.robot_scene)
 
         try:
@@ -52,6 +57,8 @@ class SceneLoader:
 
         composed = mujoco.MjSpec.from_file(str(self.robot_scene))
         self._absolutize_assets(composed)
+        if head_camera is not None:
+            self.attach_head_camera(composed, head_camera)
         if scene.mujoco_xml is not None:
             external = mujoco.MjSpec.from_file(str(scene.mujoco_xml))
             self._absolutize_assets(external)
@@ -74,6 +81,51 @@ class SceneLoader:
             temporary.cleanup()
             raise
         return LoadedPhysicsScene(output, temporary)
+
+    @staticmethod
+    def attach_head_camera(spec: Any, camera: HeadCameraSpec) -> Any:
+        """Add ``camera`` to the first of its mount bodies present in ``spec``.
+
+        The camera sits at the mount offset, faces the body's +X (pitched down
+        by the spec), and gets the spec's vertical FOV and resolution; the
+        offscreen buffer is widened to fit it. Returns the new MjsCamera.
+        """
+        body = None
+        for name in camera.mount_bodies:
+            body = SceneLoader._find_body(spec, name)
+            if body is not None:
+                break
+        if body is None:
+            names = sorted(str(b.name) for b in getattr(spec, "bodies", ()))
+            raise ValueError(
+                f"head camera mount: none of {list(camera.mount_bodies)} is a body in "
+                f"the robot MJCF (bodies: {names[:40]})"
+            )
+        mounted = body.add_camera()
+        mounted.name = camera.name
+        mounted.pos = list(camera.mount_xyz)
+        mounted.quat = list(camera.mujoco_quat())
+        mounted.fovy = camera.vertical_fov_deg
+        mounted.resolution = [camera.width, camera.height]
+        offscreen = spec.visual.global_
+        offscreen.offwidth = max(int(offscreen.offwidth), camera.width)
+        offscreen.offheight = max(int(offscreen.offheight), camera.height)
+        return mounted
+
+    @staticmethod
+    def _find_body(spec: Any, name: str) -> Any:
+        """MjSpec body lookup across MuJoCo versions (``body`` vs ``find_body``)."""
+        for attribute in ("body", "find_body"):
+            lookup = getattr(spec, attribute, None)
+            if lookup is None:
+                continue
+            try:
+                found = lookup(name)
+            except Exception:  # noqa: BLE001 - some versions raise on a miss
+                found = None
+            if found is not None:
+                return found
+        return None
 
     @staticmethod
     def _absolutize_assets(spec: object) -> None:

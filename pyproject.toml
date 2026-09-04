@@ -18,6 +18,14 @@ sonic = [
   "pyzmq>=25",
   "robot-class[sonic] @ git+https://github.com/Eastworld-Labs/robot_class.git",
 ]
+# The host-side G1 mission service: an HTTP surface over the System-2 loop, and
+# a CBOR/MQTT link to the robot through g1_auto_navigation's fleet agent. Kept
+# out of the base install because the agent core has no runtime dependencies at
+# all, and that is worth preserving -- everything here is imported lazily.
+g1 = [
+  "paho-mqtt>=2.0",
+  "cbor2>=5.6",
+]
 scene-import = [
   "numpy>=1.24",
   "plyfile>=1.1",
@@ -33,6 +41,7 @@ isaac = [
 exp-agent = "system2_agent.cli:main"
 exp-agent-sim = "system2_agent.sim_cli:main"
 exp-agent-sonic-sim = "system2_agent.official_sonic_sim_cli:main"
+exp-agent-g1 = "system2_agent.g1.cli:main"
 exp-agent-import-simfoundry = "system2_agent.simfoundry_importer:main"
 
 [build-system]

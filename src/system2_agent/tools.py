@@ -122,10 +122,22 @@ def _validate(arguments: Mapping[str, Any], schema: Json) -> None:
         "object": dict,
     }
     for key, value in arguments.items():
-        expected_name = properties.get(key, {}).get("type")
+        spec = properties.get(key, {})
+        expected_name = spec.get("type")
         expected = python_types.get(expected_name)
         if expected and not isinstance(value, expected):
             raise TypeError(f"{key} must be {expected_name}")
+        # ⚠️ AN ENUM IS A GUARANTEE, NOT A HINT. Providers that support strict
+        # tool schemas make an out-of-set value structurally impossible for the
+        # model to emit -- but not every provider does, and this layer is what
+        # makes the guarantee hold everywhere. It matters most for the one
+        # argument that turns into motion: a hallucinated destination must come
+        # back as a refusal carrying the real list, never as a lookup that
+        # happens to match something else.
+        allowed = spec.get("enum")
+        if allowed is not None and value not in allowed:
+            listed = ", ".join(repr(option) for option in allowed) or "(nothing)"
+            raise ValueError(f"{key} must be one of: {listed}")
 
 
 def _json(value: object) -> str:

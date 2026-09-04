@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from .agent import MAX_STALLED_TURNS, turn_fault
 from .model import ChatModel
 from .tools import Tool, ToolRegistry, object_schema
 from .types import Json, ToolCall
@@ -94,6 +95,7 @@ class NestedManipulationAgent:
 
     def run(self, instruction: str) -> ManipulationOutcome:
         events: list[Json] = []
+        stalled = 0
         messages: list[Json] = [
             {"role": "system", "content": self.system_prompt},
             {
@@ -106,9 +108,27 @@ class NestedManipulationAgent:
         for model_call in range(1, self.max_model_calls + 1):
             turn = self.model.complete(messages, self.registry.schemas())
             messages.append(self._assistant_message(turn))
-            if len(turn.tool_calls) != 1:
-                messages.append({"role": "user", "content": "Make exactly one tool call."})
+            # The same rule the System-2 loop uses, and it matters MORE here: this
+            # loop's arguments are end-effector deltas, so a reply cut off at the
+            # output-token limit can turn a 0.02 m nudge into a 0.2 m one and still
+            # parse. See agent.turn_fault.
+            fault = turn_fault(turn)
+            if fault is not None:
+                events.append({"type": "protocol_error", "error": fault})
+                messages.append({"role": "user", "content": fault})
+                stalled += 1
+                if stalled >= MAX_STALLED_TURNS:
+                    return ManipulationOutcome(
+                        "failed",
+                        (
+                            f"{MAX_STALLED_TURNS} turns in a row produced nothing to "
+                            f"run: {fault}"
+                        ),
+                        model_call,
+                        tuple(events),
+                    )
                 continue
+            stalled = 0
             call = turn.tool_calls[0]
             if call.name == "finish_manipulation":
                 verification = dict(self.embodiment.verify(instruction))
