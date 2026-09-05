@@ -178,6 +178,24 @@ def test_all_29_body_joints_preserve_sonic_model_dynamics(scene):
         assert composed.dof_armature[composed_dof] == pytest.approx(source.dof_armature[source_dof]), name
 
 
+def test_both_dex1_grippers_physically_close_and_reopen(scene):
+    model, data = scene.model, scene.data
+    model.opt.gravity[:] = 0  # Isolate gripper mechanics from unsupported whole-body motion.
+    names = [f"{side}_dex1_finger_joint_{finger}"
+             for side in ("left", "right") for finger in (1, 2)]
+
+    def command(target: float) -> None:
+        for name in names:
+            data.ctrl[model.actuator(name).id] = target
+        for _ in range(round(0.8 / model.opt.timestep)):
+            mujoco.mj_step(model, data)
+
+    command(-0.02)
+    assert [data.joint(name).qpos[0] for name in names] == pytest.approx([-0.02] * 4, abs=1e-6)
+    command(0.0245)
+    assert [data.joint(name).qpos[0] for name in names] == pytest.approx([0.0245] * 4, abs=1e-6)
+
+
 def test_proprioception_does_not_leak_object_truth(scene, tmp_path):
     runtime = Runtime(scene, output=tmp_path)
     first = runtime.proprioception()
