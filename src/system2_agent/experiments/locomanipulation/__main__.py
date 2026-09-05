@@ -26,6 +26,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="G1 Dex-1 native SONIC 1.1 manipulation experiments (simulation only)")
     parser.add_argument("--task", choices=TASKS, required=True)
     parser.add_argument("--dex1-assets", type=Path, default=workspace / "g1_sim_pipeline/models/dex1_urdf")
+    parser.add_argument(
+        "--sonic-g1-assets", type=Path,
+        default=workspace / "GR00T-WholeBodyControl/gear_sonic/data/robot_model/model_data/g1",
+        help="SONIC authoritative G1 model directory containing g1_29dof_with_hand.xml",
+    )
     parser.add_argument("--output", type=Path, default=Path("artifacts/locomanipulation"))
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--preview", action="store_true", help="Compile scene and render the three allowed views; no controller or task success claim")
@@ -55,7 +60,7 @@ def main() -> None:
         parser.error("official SONIC execution requires Linux/CUDA/TensorRT; use --preview on this machine")
     if not args.check and args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
         parser.error("--output must be a new or empty directory to preserve previous experiment evidence")
-    scene = build_scene(args.dex1_assets, args.task)
+    scene = build_scene(args.dex1_assets, args.task, args.sonic_g1_assets)
     if args.check:
         deploy = workspace / "GR00T-WholeBodyControl/gear_sonic_deploy"
         required = [deploy / p for p in ("policy/sonic_v1_1/model_encoder.onnx", "policy/sonic_v1_1/model_decoder.onnx",
@@ -64,6 +69,7 @@ def main() -> None:
         if platform.system() != "Linux":
             problems.append("official SONIC runtime requires Linux/CUDA/TensorRT")
         print(json.dumps({"scene_ready": True, "cameras": scene.model.ncam, "actuators": scene.model.nu,
+                          "sonic_model_source": scene.sonic_model_source,
                           "sonic_files_present": not any(not p.exists() for p in required),
                           "problems": problems, "controller_execution_validated": False}, indent=2))
         return

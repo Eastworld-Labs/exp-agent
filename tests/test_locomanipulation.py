@@ -130,9 +130,10 @@ def test_action_limits(args):
 @pytest.fixture(params=["tabletop", "floor_basket"])
 def scene(request):
     assets = Path(__file__).resolve().parents[2] / "g1_sim_pipeline/models/dex1_urdf"
-    if not assets.exists():
-        pytest.skip("local Dex-1 model not installed; see experiments/locomanipulation/README.md")
-    return build_scene(assets, request.param)
+    sonic = Path(__file__).resolve().parents[2] / "GR00T-WholeBodyControl/gear_sonic/data/robot_model/model_data/g1"
+    if not assets.exists() or not sonic.exists():
+        pytest.skip("local Dex-1 or SONIC model not installed; see experiments/locomanipulation/README.md")
+    return build_scene(assets, request.param, sonic)
 
 
 def test_scene_is_dynamic_dex1_with_only_three_body_mounted_cameras(scene):
@@ -146,6 +147,35 @@ def test_scene_is_dynamic_dex1_with_only_three_body_mounted_cameras(scene):
     assert m.neq == 0 and m.nmocap == 0
     assert tuple(m.actuator(i).name for i in range(29)) == BODY_JOINTS
     assert m.actuator("left_dex1_finger_joint_1").ctrlrange == pytest.approx([-0.02, 0.0245])
+    assert scene.sonic_model_source.endswith("model_data/g1/g1_29dof_with_hand.xml")
+    # These distinguish SONIC's active scene_43dof body from Unitree's newer
+    # 5010-wrist Dex-1 URDF previously used as the whole robot.
+    assert m.body("left_wrist_yaw_link").pos == pytest.approx([0.046, 0, 0])
+    assert m.body("waist_roll_link").pos == pytest.approx([-0.0039635, 0, 0.035])
+
+
+def test_all_29_body_joints_preserve_sonic_model_dynamics(scene):
+    source = mujoco.MjModel.from_xml_path(scene.sonic_model_source)
+    composed = scene.model
+    for name in BODY_JOINTS:
+        source_joint = source.joint(name)
+        composed_joint = composed.joint(name)
+        assert composed_joint.type == source_joint.type, name
+        assert composed_joint.pos == pytest.approx(source_joint.pos), name
+        assert composed_joint.axis == pytest.approx(source_joint.axis), name
+        assert composed_joint.range == pytest.approx(source_joint.range), name
+        source_body = source.body(int(source_joint.bodyid[0]))
+        composed_body = composed.body(int(composed_joint.bodyid[0]))
+        assert composed_body.pos == pytest.approx(source_body.pos), name
+        assert composed_body.quat == pytest.approx(source_body.quat), name
+        assert composed_body.mass == pytest.approx(source_body.mass), name
+        assert composed_body.inertia == pytest.approx(source_body.inertia), name
+        assert composed_body.ipos == pytest.approx(source_body.ipos), name
+        assert composed_body.iquat == pytest.approx(source_body.iquat), name
+        source_dof = int(source_joint.dofadr[0])
+        composed_dof = int(composed_joint.dofadr[0])
+        assert composed.dof_damping[composed_dof] == pytest.approx(source.dof_damping[source_dof]), name
+        assert composed.dof_armature[composed_dof] == pytest.approx(source.dof_armature[source_dof]), name
 
 
 def test_proprioception_does_not_leak_object_truth(scene, tmp_path):

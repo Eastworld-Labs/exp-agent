@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -32,42 +33,75 @@ class Scene:
     data: mujoco.MjData
     task: str
     xml: str
+    sonic_model_source: str
 
 
-def build_scene(asset_dir: Path, task: str) -> Scene:
-    """Compose the local Unitree Dex-1 conversion without modifying its assets.
+def build_scene(asset_dir: Path, task: str, sonic_g1_dir: Path | None = None) -> Scene:
+    """Mount Dex-1 on the exact G1 body shipped with SONIC's sim-to-sim stack.
 
-    The conversion fused the pelvis into world. Restore its floating body and
-    root-link inertia from the source URDF.
-    Camera mounts are experiment approximations, not measured calibration.
+    SONIC's ``scene_43dof.xml`` includes ``g1_29dof_with_hand.xml``.  That file
+    is authoritative for all 29 controlled body joints.  Only its Dex3 hand
+    subtrees are replaced; the separately sourced Unitree Dex-1 conversion is
+    used solely for the gripper meshes, joints and inertias.
     """
     if task not in TASKS:
         raise ValueError(f"unknown task {task!r}")
     asset_dir = asset_dir.resolve()
-    tree = ET.parse(asset_dir / "g1_dex1_converted.xml").getroot()
+    if sonic_g1_dir is None:
+        workspace = asset_dir.parents[2].parent
+        sonic_g1_dir = workspace / "GR00T-WholeBodyControl/gear_sonic/data/robot_model/model_data/g1"
+    sonic_g1_dir = sonic_g1_dir.resolve()
+    sonic_model = sonic_g1_dir / "g1_29dof_with_hand.xml"
+    tree = ET.parse(sonic_model).getroot()
+    dex_tree = ET.parse(asset_dir / "g1_dex1_converted.xml").getroot()
     compiler = tree.find("compiler")
     assert compiler is not None
-    # mj_saveLastXML preserves the URDF's ``meshes/...`` file prefix, while
-    # older conversion helpers emitted bare mesh filenames.  Resolve either
-    # representation without requiring a converter-specific directory layout.
-    mesh_files = [mesh.get("file", "") for mesh in tree.findall("./asset/mesh")]
-    prefixed = any(Path(filename).parts[:1] == ("meshes",) for filename in mesh_files)
-    compiler.set("meshdir", str(asset_dir if prefixed else asset_dir / "meshes"))
+    compiler.set("meshdir", str(sonic_g1_dir / "meshes"))
+    assets = tree.find("asset")
+    assert assets is not None
+    dex_mesh_names = {"Dex1_base_link", "Dex1_finger_link_1", "Dex1_finger_link_2",
+                      "dex1_col_1", "dex1_col_2"}
+    for mesh in dex_tree.findall("./asset/mesh"):
+        if mesh.get("name") not in dex_mesh_names:
+            continue
+        added = copy.deepcopy(mesh)
+        filename = Path(added.get("file", ""))
+        if filename.parts[:1] == ("meshes",):
+            filename = Path(*filename.parts[1:])
+        added.set("file", str(asset_dir / "meshes" / filename))
+        assets.append(added)
+
+    # Remove the SONIC scene's Dex3 articulation and mount the Dex-1 end
+    # effector at the same wrist-yaw frames.  Body kinematics through both
+    # wrist-yaw joints remain byte-for-byte sourced from SONIC.
+    for side in ("left", "right"):
+        wrist = tree.find(f".//body[@name='{side}_wrist_yaw_link']")
+        dex_wrist = dex_tree.find(f".//body[@name='{side}_wrist_yaw_link']")
+        assert wrist is not None and dex_wrist is not None
+        for child in list(wrist):
+            if child.tag == "body" and child.get("name", "").startswith(f"{side}_hand_"):
+                wrist.remove(child)
+            elif child.tag == "geom" and "hand_palm" in child.get("mesh", ""):
+                wrist.remove(child)
+        for child in dex_wrist:
+            if ((child.tag == "body" and "dex1_finger" in child.get("name", "")) or
+                    (child.tag == "geom" and child.get("mesh") == "Dex1_base_link")):
+                wrist.append(copy.deepcopy(child))
+
+    # The bundled actuators/sensors reference the removed Dex3 joints. Runtime
+    # owns the 29 SONIC motors and four Dex-1 position actuators explicitly.
+    for section_name in ("actuator", "sensor"):
+        section = tree.find(section_name)
+        if section is not None:
+            tree.remove(section)
     ET.SubElement(tree, "option", timestep="0.002", gravity="0 0 -9.81", integrator="implicitfast")
     visual = ET.SubElement(tree, "visual")
     ET.SubElement(visual, "global", offwidth="640", offheight="480")
     ET.SubElement(visual, "headlight", ambient="0.4 0.4 0.4", diffuse="0.7 0.7 0.7")
     world = tree.find("worldbody")
     assert world is not None
-    contents = list(world)
-    for child in contents:
-        world.remove(child)
-    pelvis = ET.SubElement(world, "body", name="pelvis", pos="0 0 0.79")
-    ET.SubElement(pelvis, "freejoint", name="floating_base_joint")
-    # Pelvis root-link inertia from Unitree's URDF.
-    ET.SubElement(pelvis, "inertial", pos="0 0 -0.07605", mass="3.813",
-                  fullinertia="0.010549 0.0093089 0.0079184 0 0.0000021 0")
-    pelvis.extend(contents)
+    pelvis = world.find("./body[@name='pelvis']")
+    assert pelvis is not None
     for parent in tree.iter():
         for child in list(parent):
             if child.tag == "camera":
@@ -89,8 +123,9 @@ def build_scene(asset_dir: Path, task: str) -> Scene:
         ET.SubElement(wrist, "site", name=f"vr_{side}",
                       pos=" ".join(map(str, VR_OFFSETS[side])), size="0.004", rgba="0 0 0 0")
     for joint in tree.findall(".//joint"):
-        joint.set("damping", "0.05" if "dex1" in joint.get("name", "") else "0.1")
-        joint.set("armature", "0.01")
+        if "dex1" in joint.get("name", ""):
+            joint.set("damping", "0.05")
+            joint.set("armature", "0.01")
     # Contact-only grasping: no object weld, mocap attachment, or gravity compensation.
     for body in tree.findall(".//body"):
         if "dex1_finger" in body.get("name", ""):
@@ -147,7 +182,7 @@ def build_scene(asset_dir: Path, task: str) -> Scene:
             data.joint(name).qpos[0] = 0.0245
             data.ctrl[model.actuator(name).id] = 0.0245
     mujoco.mj_forward(model, data)
-    return Scene(model, data, task, xml)
+    return Scene(model, data, task, xml, str(sonic_model))
 
 
 class Evaluator:

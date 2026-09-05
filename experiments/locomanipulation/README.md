@@ -31,16 +31,21 @@ This is an experimental harness, not a demonstrated pick-and-place controller.
 
 ## Robot and camera provenance
 
-Reuse the local `g1_sim_pipeline/models/dex1_urdf` asset directory. It must contain
-`g1_dex1_converted.xml` and `meshes/`. Do not use its replay program as a dynamics
-controller: the converted XML has a fixed root and no motor actuators.
+The 29-DoF body comes directly from SONIC's own active sim-to-sim model:
+`GR00T-WholeBodyControl/gear_sonic/data/robot_model/model_data/g1/g1_29dof_with_hand.xml`,
+the file included by SONIC's configured `scene_43dof.xml`. The composer preserves
+that model's pelvis, joint hierarchy, frames, limits and body inertias. It removes
+only the bundled Dex3 articulation and its actuator/sensor declarations.
 
-The source robot is Unitree's `g1_29dof_mode_15_with_dex1_1` (29 body joints,
-two coupled sliding fingers per hand, 5010 wrists), described in the
+Dex-1 is then mounted as an end-effector attachment from the local
+`g1_sim_pipeline/models/dex1_urdf` bundle. That directory must contain
+`g1_dex1_converted.xml` and `meshes/`, sourced from Unitree's
+`g1_29dof_mode_15_with_dex1_1` in the
 [official G1 model catalogue](https://github.com/unitreerobotics/unitree_ros/blob/master/robots/g1_description/README.md).
-Our composer restores the free pelvis/inertia and adds torque/position actuators
-without modifying the source files. The SONIC training embodiment differs; mass,
-inertia and actuator transfer must be checked before interpreting failures.
+Only its Dex-1 base/finger meshes, joints and inertias are imported; its different
+5010-wrist G1 body is deliberately not used. The changed hand payload still means
+Dex-1 dynamics are not identical to SONIC's Dex3 training scene, so unsupported
+tracking and grasp stability must be validated experimentally.
 The finger aperture is a **simulation-normalized jaw target**, not the real
 Dex-1 DDS motor value (0..5.5). It is not sent through SONIC's seven-joint Dex3
 hand fields.
@@ -74,9 +79,11 @@ uv pip install --python .venv/bin/python -e '../robot_class' -e '.[locomanipulat
   --task floor_basket --preview --output artifacts/basket-preview
 ```
 
-Use `--dex1-assets /path/to/dex1_urdf` on another machine. Large external meshes
-are deliberately not copied into this repo. Copy the complete local asset
-directory, not just its XML. The default finds the sibling `g1_sim_pipeline`.
+Use `--dex1-assets /path/to/dex1_urdf` and, if necessary,
+`--sonic-g1-assets /path/to/gear_sonic/data/robot_model/model_data/g1` on another
+machine. Large external meshes are deliberately not copied into this repo. Copy
+the complete local asset directory, not just its XML. Defaults find the sibling
+`g1_sim_pipeline` and `GR00T-WholeBodyControl` checkouts.
 Output directories must be new/empty so previous evidence is not overwritten.
 On macOS the renderer needs graphics access; on headless Linux use `MUJOCO_GL=egl`.
 Preview writes three JPEGs and an explicit `preview_only` result with no success
