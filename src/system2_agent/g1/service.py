@@ -293,11 +293,44 @@ class MissionRunner:
             camera = MqttHeadCamera(self.link(target.robot_id))
             modules.append(CameraModule(camera, max_looks=self.config.max_looks))
             if target.local_planner:
-                modules.append(self._local_planner(target, camera, backend))
+                from ..modules.local_planner import LocalPlannerModule
+
+                planner = self._local_planner(target, camera)
+                modules.append(LocalPlannerModule(planner, backend))
+                if self.config.search:
+                    modules.append(self._search(planner, backend))
         return modules
 
-    def _local_planner(self, target: TargetConfig, camera: Any, backend: Any) -> Any:
-        """The approach tool, over the same link as everything else.
+    def _search(self, planner: Any, backend: Any) -> Any:
+        """`find_object`: the loop that goes and looks when nothing is in frame.
+
+        Built on the SAME planner object as `local_planner`, deliberately. They
+        share the camera, the grounder, the costmap and the pose source, so the
+        picture the search grounds on is the picture the approach then measures
+        against -- two planners would be two `latest()` reads and a box drawn on
+        one frame ranged against another.
+        """
+        from ..grounding import StandpointPicker
+        from ..modules.search import SearchModule
+
+        return SearchModule(
+            planner,
+            backend,
+            # The same cheap vision model the grounder uses: this is one more
+            # one-image question, not a second class of model.
+            picker=StandpointPicker(self._grounding_model()),
+            cancel=self.cancel,
+            max_legs=self.config.search_max_legs,
+            radius_m=self.config.search_radius_m,
+            max_seconds=self.config.search_max_seconds,
+        )
+
+    def _local_planner(self, target: TargetConfig, camera: Any) -> Any:
+        """The `LocalPlanner` both `local_planner` and `find_object` run on.
+
+        Returns the PLANNER, not the module: two tools are built over it now
+        (the approach, and the search that goes and looks first), and they must
+        share one -- see `_search`.
 
         Not built in dry-run: it grounds on real pictures and plans on a real
         costmap, and a dry run has neither. The camera is omitted there too, so
@@ -305,7 +338,6 @@ class MissionRunner:
         """
         from ..grounding import VisionGrounder
         from ..local_planner import LocalPlanner
-        from ..modules.local_planner import LocalPlannerModule
         from .depth import MqttHeadDepth
         from .local_costmap import MqttInitPose, MqttLocalCostmap
 
@@ -327,7 +359,7 @@ class MissionRunner:
             max_leg_m=config.local_max_leg_m,
             max_range_m=config.local_range_max_m,
         )
-        return LocalPlannerModule(planner, backend)
+        return planner
 
     def _grounding_model(self) -> OpenAICompatibleModel:
         """The model that finds a box in a photograph.

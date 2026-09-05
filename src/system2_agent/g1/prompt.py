@@ -22,13 +22,27 @@ somewhere is the whole of your control over motion.
 somebody labelled on the map -- a room, a spot. local_planner walks the last few metres to a \
 THING the robot can see in the head_colour frame right now -- a sink, a chair, a box -- using \
 its depth camera and its own local obstacle map, never the semantic map.
-- So "go to the sink" is two stages: navigate_to the labelled place the sink is in, look at the \
-fresh camera frame, then local_planner("sink") once it is actually in the picture. Never \
-substitute a nearest-sounding label for either one. If no label names the right room and no \
-visible object matches, say so and stop -- there is no exploring.
+- THERE IS A THIRD WAY TO MOVE, AND IT IS FOR WHEN THE THING IS NOT IN SIGHT. find_object turns \
+the robot on the spot and then walks it to places its own obstacle map says would reveal floor \
+nobody has looked at, grounding on a fresh picture at each one. Use it when local_planner has \
+refused because the object is not visible. It stops the moment it finds the thing and leaves the \
+robot FACING it.
+- So "go to the sink" is up to three stages: navigate_to the labelled place the sink is in; look \
+at the fresh camera frame; if the sink is in the picture, local_planner("sink"); if it is NOT, \
+find_object("sink") and then local_planner("sink") once it has been found. Never substitute a \
+nearest-sounding label for the place. If no label names the right room at all, say so and stop.
+- ##### GIVE find_object A `hint` WHENEVER YOU CAN. ##### You can see the picture and it cannot \
+reason about the room -- "probably behind the kitchen island", "likely along the left wall". That \
+does not set a position; it only breaks ties between places the robot's map already says are \
+worth looking. Say what in the picture makes you think so.
+- find_object's `outcome` is the field to read. "found" means it is in frame now, so call \
+local_planner next. "exhausted" means the robot has looked everywhere it can reach from there and \
+the thing is NOT in that part of the room -- try another labelled place or report it, do NOT \
+search again from the same spot. "budget" means it ran out of legs or time somewhere new, so look \
+at the fresh picture and decide.
 - local_planner needs the thing IN THE CURRENT PICTURE. If it refuses because the object is not \
-visible, or because nothing solid is where the camera says, the answer is to move or turn with \
-navigate_to and look again -- not to call it again from the same spot.
+visible, or because nothing solid is where the camera says, the answer is find_object -- or a \
+different navigate_to -- not calling it again from the same spot.
 - ##### ONE local_planner CALL IS OFTEN ONE LEG, NOT THE WHOLE APPROACH. ##### Its result says \
 `reached_standoff`. When that is false the robot walked part of the way and the rest is still \
 ahead: look at the fresh frame and call local_planner AGAIN with the same target. Keep going \

@@ -846,6 +846,96 @@ On macOS, launch camera/viewer runs from an interactive desktop session with
 MuJoCo's `mjpython`; a headless shell has no CoreGraphics context. Navigation
 without `--with-vision` does not need a graphics context.
 
+### Going to look for it: `find_object`
+
+`local_planner` needs the thing in the current frame. When it is not there, the
+robot has to go and look — and the whole question is *where*.
+
+The scene that motivates it: the robot arrives at a labelled place and faces a
+counter, and the object is on the floor behind it. On the local costmap that
+strip of floor reads **free**, because nothing has ever sensed it and Nav2's
+local costmap does not track unknown space. A candidate generator reading only
+"is this cell free" therefore proposes standing *inside* the region nothing has
+looked at — useless, and the one place a biped should not walk.
+
+So `find_object(target, reason, hint)` keeps its own memory: a visibility map
+built by ray-casting the camera cone through the costmap, so a ray **stops** at
+the counter. The strip behind it stays unobserved, and the cells that are
+observed-and-free beside it — the frontier, which in that scene lines the
+counter's two ends — are where the robot goes to see more.
+
+```text
+"find the sofa"
+  navigate_to("living_room")     a labelled place, Nav2, as before
+  find_object("sofa")            turns, then walks to where it can see more
+  local_planner("sofa")          now that it is in frame, close the last metres
+```
+
+One call runs the whole loop on the host: ground on the current frame, turn four
+quarters grounding each one, then repeatedly pick a standpoint, walk one Nav2
+goal, and ground again. **One approval buys every leg**, and the approval names
+the budget — at most *N* legs inside *R* metres for at most *T* seconds
+(`MISSION_SEARCH_MAX_LEGS`, `_RADIUS_M`, `_MAX_SECONDS`).
+
+That is the deliberate trade. A tool per leg would cost a reasoning turn, an
+operator approval and a retained image *per leg*; the realistic response to eight
+approvals per search is switching the gate to auto, which is strictly less safe
+than one approval a person actually reads.
+
+**It still never picks a coordinate.** Candidate standpoints come from geometry
+and are verified against the same inflated costmap `local_planner` uses. A cheap
+vision model may only choose *among* them, and `hint` is words, not a position —
+"probably behind the kitchen island" breaks a tie between places the map already
+says are worth looking.
+
+`outcome` is the field that matters: `found` (in frame now, hand off to
+`local_planner`), `exhausted` (nowhere left within the radius reveals anything
+new, so the object is not in this part of the room), `budget`, or `cancelled`.
+
+⚠️ **Cancelling this one stops the robot.** Everywhere else in this stack,
+stopping a mission does not stop a goal Nav2 already accepted. A tool that walks
+six legs under one approval cannot inherit that, so cancelling publishes the
+robot's **current pose** as a new goal, which supersedes the leg in flight. That
+is still inside the one-entry publish table; the emergency stop remains the only
+guarantee.
+
+⚠️ **A second search from the same spot is refused.** Measured on the pose, not
+on the last result. Without that brake a mission loops: `find_object` reports
+"found, nothing moved", `local_planner` refuses because the approach is blocked,
+and the model — reading a refusal that says *not visible* — calls `find_object`
+again. Observed in the SONIC sim before the brake existed: five
+find_object/local_planner pairs, two of them zero-motion, no step taken. The
+refusal now names the real problem, which is the approach rather than the
+finding.
+
+### Two head cameras
+
+The G1 ships with a D435i pitched **47.87°** at the floor — that is what feeds
+`/scan_depth` and the trip-hazard layer — and a D455 mounted level above it. The
+two see different worlds and neither is a superset:
+
+| | level D455 | pitched D435i |
+| --- | --- | --- |
+| field | 87° × 56° | 69.4° × 42.5° |
+| floor visible from | 2.44 m | 0.48 m to 2.51 m |
+| a cup on a 0.9 m counter | 0.76–1.41 m | out of frame past 0.51 m |
+| a cup on a 0.45 m table | never in frame | 0.60–1.41 m |
+
+On the robot the pitched camera's **colour has never been published** — the
+vision node carries one hardcoded pair of preview topic names. The **simulator
+publishes both**, on a second topic set (`/g1/floor/preview/compressed`,
+`/g1/floor/preview_depth/compressed`, `/g1/floor/depth/compressed`,
+`/g1/floor/depth_info`, `/g1/floor/status`), and the dashboard mounts its camera
+panel once per camera. Making this true on hardware is a robot-side change
+nobody has made, so `topics.json` deliberately carries no floor rows and the
+real-robot profile resolves them to `""`.
+
+⚠️ **The depth topics are separate and that is load-bearing.** Aligned depth is
+aligned to its *own* colour frame. Ranging a box grounded in the level camera's
+picture against the pitched camera's depth is wrong by the 5 cm offset and the
+48° between them — and wrong in a way that grows as the object gets nearer,
+which is exactly the regime an approach works in.
+
 ## COMPASS / X-Mobility versus Nav2
 
 The NVIDIA post linked in the design discussion shows COMPASS adapting a

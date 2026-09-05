@@ -20,6 +20,7 @@ rectangle over a blank wall becomes a metric range, a standoff pose and a walk.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -310,6 +311,164 @@ class VisionGrounder:
         )
 
 
+PICKER_SYSTEM_PROMPT = """You are helping a robot decide WHERE TO GO AND LOOK for \
+something it cannot currently see.
+
+You are shown one photograph from the robot's forward camera, and a numbered list of \
+places the robot's own obstacle map says it could stand. Each place is described by \
+which way it lies from the robot, how far the robot would walk, how much floor nobody \
+has looked at yet it would reveal, and -- when it is inside the picture -- where across \
+the frame it sits, 0.0 at the left edge and 1.0 at the right.
+
+Reply by calling choose_standpoint exactly once.
+
+- Pick the place most likely to REVEAL THE TARGET, not the place nearest the target's \
+usual home. The robot cannot see through the furniture in this picture; the whole \
+question is which way round it to go.
+- The geometry is already sound: every place offered is reachable and reveals something. \
+You are breaking a tie with what you can SEE -- a gap between counter and wall, a doorway, \
+an opening on one side, the direction a room continues in.
+- ##### IF NONE OF THEM PLAUSIBLY HOLDS THE TARGET, SAY choose=null. ##### That ends the \
+search honestly instead of walking the robot round a room the thing is not in. Do this \
+when the picture shows the target's kind of place is simply not here.
+- A place OUTSIDE the picture (no position across the frame) is not disqualified. It is \
+behind or beside the robot, and if the target is likely that way, choose it.
+- Explain your choice in one short sentence naming what in the picture decided it."""
+
+
+class StandpointPicker:
+    """Choose ONE place to go and look, from a photograph. Moves nothing.
+
+    ##### IT PICKS AN INDEX, NEVER A COORDINATE. ##### Same rule as everywhere
+    else in this stack: the geometry proposes reachable, revealing standpoints
+    and a model may only say which of them to take. A model that could name a
+    pose would be choosing where a two-legged robot walks from a picture.
+
+    Nested and cheap for the same reason `VisionGrounder` is: the mission model
+    already has the frame in its transcript, but asking IT costs a whole
+    reasoning turn at mission effort, and this question is asked once per leg.
+
+    ⚠️ EVERY FAILURE MODE FALLS BACK TO GEOMETRY, and the caller does that
+    rather than this class raising: a picker that cannot answer must cost a
+    less-informed choice, never a stopped search.
+    """
+
+    def __init__(
+        self,
+        model: ChatModel,
+        *,
+        max_model_calls: int = 2,
+        system_prompt: str = PICKER_SYSTEM_PROMPT,
+    ) -> None:
+        self.model = model
+        self.max_model_calls = max_model_calls
+        self.system_prompt = system_prompt
+
+    def pick(
+        self,
+        target: str,
+        hint: str,
+        frame: CameraFrame,
+        candidates: Any,
+    ) -> tuple[int | None, str]:
+        """(index, why) or (None, why). Raises only if the model is unusable."""
+        options = "\n".join(
+            self._describe(index, candidate) for index, candidate in enumerate(candidates)
+        )
+        tool = self._choose_tool(len(candidates))
+        request = (
+            f"Target: {target}\n"
+            + (f"What the mission controller expects: {hint}\n" if hint else "")
+            + f"Camera: {frame.label}\n\n"
+            f"Places the robot could stand:\n{options}\n\n"
+            "Which one is most likely to reveal the target?"
+        )
+        messages: list[Json] = [
+            {"role": "system", "content": self.system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": request},
+                    {"type": "image_url", "image_url": {"url": frame.url}},
+                ],
+            },
+        ]
+        last_fault = ""
+        for _ in range(self.max_model_calls):
+            turn = self.model.complete(messages, [tool.schema()])
+            fault = turn_fault(turn)
+            if fault is None and turn.tool_calls[0].name != tool.name:
+                fault = f"call {tool.name}, not {turn.tool_calls[0].name}"
+            arguments: Any
+            if fault is None:
+                arguments = turn.tool_calls[0].arguments
+            else:
+                arguments = _json_object(turn.content)
+                if arguments is None:
+                    last_fault = fault
+                    messages.append(assistant_message(turn))
+                    messages.append({"role": "user", "content": fault})
+                    continue
+            result = tool.run(arguments)
+            if not result.ok:
+                last_fault = str(result.error)
+                messages.append(assistant_message(turn))
+                messages.append({"role": "user", "content": f"that was not usable: {last_fault}"})
+                continue
+            data = dict(result.data)
+            why = str(data.get("why") or "").strip()
+            choice = data.get("choose")
+            if choice is None:
+                return (None, why or f"nothing here looks like it would reveal {target!r}")
+            return (int(choice), why)
+        raise ValueError(f"the picker did not choose in {self.max_model_calls} attempts: {last_fault}")
+
+    def _describe(self, index: int, candidate: Any) -> str:
+        bearing = float(getattr(candidate, "bearing_rad", 0.0))
+        degrees = abs(round(math.degrees(bearing)))
+        side = "ahead" if degrees < 8 else ("left" if bearing > 0 else "right")
+        where = f"{degrees}deg to the {side}" if side != "ahead" else "straight ahead"
+        fraction = getattr(candidate, "image_fraction", None)
+        in_frame = (
+            f"{fraction:.2f} across the picture" if fraction is not None
+            else "OUTSIDE the picture (behind or beside the robot)"
+        )
+        return (
+            f"  {index}: {where}, {float(candidate.distance_m):.1f} m walk, "
+            f"reveals {int(candidate.gain_cells)} unseen patches, {in_frame}"
+        )
+
+    def _choose_tool(self, count: int) -> Tool:
+        return Tool(
+            name="choose_standpoint",
+            description="Choose which listed place the robot should go and look from.",
+            parameters=object_schema(
+                {
+                    "choose": {
+                        # ⚠️ NULLABLE ON PURPOSE, AND THAT IS THE POINT OF THE TOOL.
+                        # "none of these" has to be as easy to say as a number, or
+                        # the model picks the least-bad option and the robot walks
+                        # a circuit of a room the object is not in.
+                        "type": ["integer", "null"],
+                        "description": (
+                            f"The number of the place to go to, 0 to {max(0, count - 1)}, "
+                            "or null if none of them plausibly holds the target."
+                        ),
+                    },
+                    "why": {
+                        "type": "string",
+                        "description": (
+                            "One sentence naming what in the picture decided it. An "
+                            "operator reads this afterwards."
+                        ),
+                    },
+                },
+                ["choose", "why"],
+            ),
+            handler=lambda arguments: dict(arguments),
+        )
+
+
 def _json_object(text: str) -> Json | None:
     """The first JSON object in a prose reply, or None.
 
@@ -343,4 +502,11 @@ def _merge_usage(total: Json | None, turn: Json | None) -> Json | None:
     return merged
 
 
-__all__ = ["Box", "Grounding", "VisionGrounder", "GROUNDING_SYSTEM_PROMPT"]
+__all__ = [
+    "Box",
+    "Grounding",
+    "GROUNDING_SYSTEM_PROMPT",
+    "PICKER_SYSTEM_PROMPT",
+    "StandpointPicker",
+    "VisionGrounder",
+]

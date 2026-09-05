@@ -173,6 +173,20 @@ class ServiceConfig:
     local_costmap_stale_s: float = 5.0
     #: Past this the depth camera's own ranging is not trusted.
     local_range_max_m: float = 6.0
+    #: Whether `find_object` is offered: the loop that TURNS AND WALKS to go
+    #: look for something not in frame. Needs the local planner (it runs on the
+    #: same camera, grounder and costmap) and is silently off without it.
+    #:
+    #: ⚠️ ONE APPROVAL BUYS EVERY LEG OF ONE SEARCH. That is the deliberate
+    #: trade -- see modules/search.py -- and the three budgets below are what
+    #: the operator is actually approving, so they belong in the config an
+    #: operator can see rather than in the model's arguments alone.
+    search: bool = True
+    search_max_legs: int = 6
+    search_radius_m: float = 4.0
+    #: Wall clock, and the binding limit in practice: a G1 walks about 0.5 m/s
+    #: and Nav2's own per-goal timeout is 120 s.
+    search_max_seconds: float = 180.0
     #: The grounding model. Empty means "the mission model", which is the sane
     #: default; a cheaper vision model is a legitimate override because finding
     #: a box in a photograph is not the job the mission model is chosen for.
@@ -237,6 +251,10 @@ class ServiceConfig:
             local_footprint_m=float(get("MISSION_LOCAL_FOOTPRINT_M", "0.35") or 0.35),
             local_costmap_stale_s=float(get("MISSION_LOCAL_COSTMAP_STALE_S", "5") or 5),
             local_range_max_m=float(get("MISSION_LOCAL_RANGE_MAX_M", "6") or 6),
+            search=_flag(get("MISSION_SEARCH"), True),
+            search_max_legs=int(get("MISSION_SEARCH_MAX_LEGS", "6") or 6),
+            search_radius_m=float(get("MISSION_SEARCH_RADIUS_M", "4") or 4),
+            search_max_seconds=float(get("MISSION_SEARCH_MAX_SECONDS", "180") or 180),
             grounding_model=get("MISSION_GROUNDING_MODEL", ""),
             grounding_effort=get("MISSION_GROUNDING_EFFORT", "low"),
             grounding_min_confidence=float(

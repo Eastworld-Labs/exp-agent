@@ -44,6 +44,22 @@ COLOUR_TOPIC = "/g1/d435c/preview/compressed"
 RANGE_TOPIC = "/g1/d435c/preview_depth/compressed"
 STATUS_TOPIC = "/object_grounding_status"
 
+#: THE SECOND HEAD CAMERA: the D435i the G1 ships with, pitched ~48 degrees at
+#: the floor. Its colour has never been published -- the robot uses it only for
+#: `/scan_depth` and the trip-hazard layer -- so these topics are new on both
+#: sides rather than a rename of anything.
+#:
+#: ⚠️ `floor`, NOT `d435i`, ON PURPOSE. Two reasons. It names the camera's ROLE,
+#: which is what every doc in g1_auto_navigation already calls it ("a dedicated
+#: floor sensor", DEPTH_OBSTACLES.md), and it cannot be misread as the existing
+#: `d435c` in a config file -- those two differ by one letter in the middle of a
+#: topic path, which is a diff nobody catches.
+FLOOR_COLOUR_TOPIC = "/g1/floor/preview/compressed"
+FLOOR_RANGE_TOPIC = "/g1/floor/preview_depth/compressed"
+FLOOR_DEPTH_TOPIC = "/g1/floor/depth/compressed"
+FLOOR_DEPTH_INFO_TOPIC = "/g1/floor/depth_info"
+FLOOR_STATUS_TOPIC = "/g1/floor/status"
+
 #: MEASURABLE depth, as opposed to the range PREVIEW above. The preview is a
 #: Turbo colour map with its legend drawn into it -- evidence for a reader, and
 #: nothing a computer can measure. `local_planner` needs metres, so these two
@@ -65,6 +81,8 @@ DEPTH_FORMAT = "16UC1; png"
 DEPTH_SCALE = 0.001
 COLOUR_LABEL = "head_colour"
 RANGE_LABEL = "head_range"
+FLOOR_COLOUR_LABEL = "floor_colour"
+FLOOR_RANGE_LABEL = "floor_range"
 
 #: sensor_msgs/CompressedImage.format as the vision node writes it: bare "jpeg".
 #: Both previews carry the COLOUR optical frame; depth is aligned to colour.
@@ -206,6 +224,99 @@ def _quaternion_from_columns(x: tuple[float, ...], y: tuple[float, ...], z: tupl
 
 #: The default camera: a RealSense D455 on the head, facing forward.
 D455 = HeadCameraSpec()
+
+#: THE CAMERA THE G1 SHIPS WITH, pitched at the floor. Every number is the one
+#: g1_auto_navigation MEASURED on g1-016 rather than a datasheet figure:
+#:
+#:   pitch 47.87 deg down   RANSAC floor-plane fit in the camera's own cloud;
+#:                          the URDF's torso_link->d435_link quaternion agrees
+#:                          to 0.28 deg (docs/DEPTH_OBSTACLES.md section 1)
+#:   height 1.254 m         the same fit. The D455 sits 0.05 m ABOVE it, which
+#:                          is where this mount z comes from: D455's 0.42987 in
+#:                          torso_link, minus that 0.05.
+#:   69.4 x 42.5 deg        the D435's colour FOV at 16:9 (g1_vision's
+#:                          camera_source.py header uses exactly this pair)
+#:
+#: Those give a view spanning 26.6 to 69.2 degrees below horizontal, i.e. floor
+#: from 0.48 m to 2.51 m ahead -- which reproduces the table in
+#: docs/OBJECT_GOAL.md section 2 to the centimetre. If this spec ever stops
+#: reproducing it, this spec is what is wrong.
+#:
+#: ⚠️ THE RANGE WINDOW IS 0.3-3.0 m, NOT THE D455's. The robot's driver clips
+#: this camera at 3.0 m, so a preview coloured over the D455's window would
+#: paint most of the frame at one end of the ramp.
+D435I = HeadCameraSpec(
+    name="head_d435i",
+    width=640,
+    height=360,
+    horizontal_fov_deg=69.4,
+    mount_xyz=(0.0576235, 0.01753, 0.37987),
+    pitch_down_deg=47.87,
+    min_range_m=0.3,
+    max_range_m=3.0,
+    near_clip_m=0.3,
+    far_clip_m=3.0,
+    frame_id="d435i_color_optical_frame",
+)
+
+
+@dataclass(frozen=True)
+class CameraTopics:
+    """Where one camera's frames go, and what the model calls them.
+
+    ##### THE ROBOT HAS TWO HEAD CAMERAS AND THEY SEE DIFFERENT WORLDS. #####
+    The level D455 sees the room and grounds objects; the pitched D435i sees the
+    floor 0.5-2.5 m ahead and nothing above knee height beyond a metre. Publishing
+    both was a one-line change only because every topic name used to be a module
+    constant baked into :class:`HeadCameraStream`; this record is what made a
+    second stream possible without a second copy of the stream.
+
+    ⚠️ `camera` IS NOT DECORATION. It travels in the depth-info JSON, and it is
+    the only thing telling a consumer WHICH lens produced the millimetres it is
+    about to deproject. Two cameras 0.05 m apart pointing 48 degrees away from
+    each other produce very different answers for the same pixel.
+    """
+
+    colour: str
+    range: str
+    depth: str
+    depth_info: str
+    status: str
+    camera: str
+    colour_label: str
+    range_label: str
+
+
+#: The level camera, on the topic names the dashboard, the fleet manifests and
+#: `MqttHeadCamera` have always used. ⚠️ THE `d435c` IN THEM IS HISTORICAL: with
+#: `D455=1` the robot's vision node publishes the LEVEL D455's pixels here.
+#: Renaming them is a change across two repositories and a running dashboard,
+#: which is why the pitched camera got new names instead.
+HEAD_TOPICS = CameraTopics(
+    colour=COLOUR_TOPIC,
+    range=RANGE_TOPIC,
+    depth=DEPTH_TOPIC,
+    depth_info=DEPTH_INFO_TOPIC,
+    status=STATUS_TOPIC,
+    camera="d455",
+    colour_label=COLOUR_LABEL,
+    range_label=RANGE_LABEL,
+)
+
+#: The pitched floor camera. Its metric depth is published on its OWN topic
+#: rather than the camera-neutral `/g1/head/depth`, because that one is the
+#: level camera's and `local_planner` ranges a box drawn in the level camera's
+#: colour frame against it. Aligned depth is only aligned to ITS OWN colour.
+FLOOR_TOPICS = CameraTopics(
+    colour=FLOOR_COLOUR_TOPIC,
+    range=FLOOR_RANGE_TOPIC,
+    depth=FLOOR_DEPTH_TOPIC,
+    depth_info=FLOOR_DEPTH_INFO_TOPIC,
+    status=FLOOR_STATUS_TOPIC,
+    camera="d435i",
+    colour_label=FLOOR_COLOUR_LABEL,
+    range_label=FLOOR_RANGE_LABEL,
+)
 
 
 @dataclass(frozen=True)
@@ -475,18 +586,22 @@ class HeadCameraBackend:
         *,
         encoder: Callable[..., bytes] = encode_jpeg,
         include_range: bool = True,
+        topics: CameraTopics = HEAD_TOPICS,
     ) -> None:
         self.camera = camera
         self.encoder = encoder
         self.include_range = include_range
+        self.topics = topics
 
     def capture(self) -> list[CameraFrame]:
         frame = self.camera.capture()
         colour = self.encoder(frame.rgb, quality=COLOUR_JPEG_QUALITY, width=COLOUR_PREVIEW_WIDTH)
-        frames = [CameraFrame(COLOUR_LABEL, _data_url(colour))]
+        frames = [CameraFrame(self.topics.colour_label, _data_url(colour))]
         if self.include_range:
             preview = depth_preview(frame.depth, self.camera.spec)
-            frames.append(CameraFrame(RANGE_LABEL, _data_url(self.encoder(preview, quality=RANGE_JPEG_QUALITY))))
+            frames.append(
+                CameraFrame(self.topics.range_label, _data_url(self.encoder(preview, quality=RANGE_JPEG_QUALITY)))
+            )
         return frames
 
     def close(self) -> None:
@@ -590,6 +705,7 @@ class HeadCameraStream:
         depth_hz: float = DEPTH_HZ,
         depth_width: int = DEPTH_WIDTH,
         source: str = "sim",
+        topics: CameraTopics = HEAD_TOPICS,
         encoder: Callable[..., bytes] = encode_jpeg,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
@@ -600,6 +716,9 @@ class HeadCameraStream:
             raise ValueError("depth rate cannot be negative")
         self.camera = camera
         self.publisher = publisher
+        #: Which camera's topic set this stream writes. Defaults to the level
+        #: camera's, so every existing caller keeps the wire it had.
+        self.topics = topics
         self.interval_s = 1.0 / hz
         self.status_interval_s = 1.0 / status_hz
         # Metric depth is published SLOWER than the previews and on its own
@@ -639,8 +758,8 @@ class HeadCameraStream:
         spec = self.camera.spec
         colour = self.encoder(frame.rgb, quality=COLOUR_JPEG_QUALITY, width=COLOUR_PREVIEW_WIDTH)
         range_jpeg = self.encoder(depth_preview(frame.depth, spec), quality=RANGE_JPEG_QUALITY)
-        self.publisher.publish(COLOUR_TOPIC, compressed_image(colour, stamp_s=stamp, frame_id=spec.frame_id))
-        self.publisher.publish(RANGE_TOPIC, compressed_image(range_jpeg, stamp_s=stamp, frame_id=spec.frame_id))
+        self.publisher.publish(self.topics.colour, compressed_image(colour, stamp_s=stamp, frame_id=spec.frame_id))
+        self.publisher.publish(self.topics.range, compressed_image(range_jpeg, stamp_s=stamp, frame_id=spec.frame_id))
         now = self._monotonic()
         # ⚠️ THE SAME `frame`, NOT A SECOND CAPTURE. Rendering again for the
         # metric copy would put the previews and the measurement a frame apart,
@@ -661,7 +780,7 @@ class HeadCameraStream:
         spec = self.camera.spec
         png = encode_depth_png(depth, width=self.depth_width)
         self.publisher.publish(
-            DEPTH_TOPIC,
+            self.topics.depth,
             compressed_image(png, stamp_s=stamp_s, frame_id=spec.frame_id, fmt=DEPTH_FORMAT),
         )
         import numpy as np
@@ -671,8 +790,19 @@ class HeadCameraStream:
         # connects between frames must be able to read the lens immediately, or
         # it drops depth frames it could have used.
         self.publisher.publish(
-            DEPTH_INFO_TOPIC,
-            {"data": json.dumps(depth_info(spec, width, height, stamp_s=stamp_s, source=self.source))},
+            self.topics.depth_info,
+            {
+                "data": json.dumps(
+                    depth_info(
+                        spec,
+                        width,
+                        height,
+                        stamp_s=stamp_s,
+                        source=self.source,
+                        camera=self.topics.camera,
+                    )
+                )
+            },
             retain=True,
             qos=1,
         )
@@ -692,7 +822,7 @@ class HeadCameraStream:
         hz = round(self.measured_hz(), 2)
         colour = {
             "enabled": True,
-            "topic": COLOUR_TOPIC,
+            "topic": self.topics.colour,
             "published": self.frames,
             "hz": hz,
             "lag_ms": round(self.last_lag_ms, 1),
@@ -705,7 +835,7 @@ class HeadCameraStream:
         }
         depth = {
             **colour,
-            "topic": RANGE_TOPIC,
+            "topic": self.topics.range,
             "last_bytes": self.last_range_bytes,
             "width": RANGE_PREVIEW_WIDTH,
             "jpeg_quality": RANGE_JPEG_QUALITY,
@@ -714,8 +844,8 @@ class HeadCameraStream:
         }
         metric = {
             "enabled": bool(self.depth_interval_s),
-            "topic": DEPTH_TOPIC,
-            "info_topic": DEPTH_INFO_TOPIC,
+            "topic": self.topics.depth,
+            "info_topic": self.topics.depth_info,
             "published": self.depth_frames,
             "max_hz": self.depth_hz,
             "last_bytes": self.last_depth_bytes,
@@ -728,6 +858,7 @@ class HeadCameraStream:
             "uptime_s": round(self._monotonic() - self._started, 1),
             "source": self.source,
             "model": None,
+            "which_camera": self.topics.camera,
             "frame_id": spec.frame_id,
             "grounder": {"alive": False, "device": None, "error": "no grounder in simulation", "loading": False},
             "preview": colour,
@@ -739,7 +870,7 @@ class HeadCameraStream:
 
     def publish_status(self) -> None:
         # std_msgs/String, retained like the manifest says: health is a state.
-        self.publisher.publish(STATUS_TOPIC, {"data": json.dumps(self.status())}, retain=True, qos=1)
+        self.publisher.publish(self.topics.status, {"data": json.dumps(self.status())}, retain=True, qos=1)
 
     # -------------------------------------------------------------- loop --
     def tick(self) -> bool:
@@ -812,9 +943,20 @@ class HeadCameraStream:
 
 
 __all__ = [
+    "CameraTopics",
     "COLOUR_LABEL",
     "COLOUR_TOPIC",
+    "D435I",
     "D455",
+    "FLOOR_COLOUR_LABEL",
+    "FLOOR_COLOUR_TOPIC",
+    "FLOOR_DEPTH_INFO_TOPIC",
+    "FLOOR_DEPTH_TOPIC",
+    "FLOOR_RANGE_LABEL",
+    "FLOOR_RANGE_TOPIC",
+    "FLOOR_STATUS_TOPIC",
+    "FLOOR_TOPICS",
+    "HEAD_TOPICS",
     "DEPTH_FORMAT",
     "DEPTH_INFO_TOPIC",
     "DEPTH_SCALE",
