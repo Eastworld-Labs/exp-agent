@@ -66,7 +66,7 @@ From `exp-agent`, install into an isolated environment:
 
 ```bash
 uv venv .venv
-uv pip install --python .venv/bin/python -e '.[locomanipulation]' pytest
+uv pip install --python .venv/bin/python -e '../robot_class' -e '.[locomanipulation]' pytest
 
 .venv/bin/python -m system2_agent.experiments.locomanipulation \
   --task tabletop --preview --output artifacts/tabletop-preview
@@ -120,8 +120,16 @@ Terminal 3, from `exp-agent`:
 MUJOCO_GL=egl .venv/bin/python -m system2_agent.experiments.locomanipulation \
   --task tabletop --connect-sonic \
   --actions experiments/locomanipulation/hold.json \
+  --record-video \
   --output artifacts/tabletop-hold-001
 ```
+
+`--record-video` writes `camera_evidence.mp4` continuously. It shows the same
+three public robot cameras available to the agent, an evidence-only tracking
+view, and the active `move_to` step with its exact parameters. The observer view
+is rendered with a free MuJoCo camera: it is not a model camera, agent input or
+tool observation. Private evaluator state is never overlaid. Use `--record-fps`
+(1..15, default 5) to bound render load.
 
 `hold.json` is only a standing/three-point/gripper transport diagnostic, **not a
 scripted pickup or an agent benchmark**. First confirm it remains standing and
@@ -167,6 +175,11 @@ There is no contact/force-aware load planner yet. The next baseline after standi
 is scripted tracking; do not attribute all subsequent failure to the VLM.
 
 The adapter follows the checked upstream native path:
+
+- `robot_class.robot.ZmqSonicPlannerBridge`: owns validation, canonical planner
+  packet serialization, ZMQ lifecycle and SONIC start/stop commands. This
+  experiment submits namespaced robot actions and does not own the controller
+  transport.
 
 - `gear_sonic/scripts/pico_manager_thread_server.py`, `PLANNER_VR_3PT`:
   planner fields and `vr_position`/`vr_orientation` in one message.

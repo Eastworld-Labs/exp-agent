@@ -13,7 +13,7 @@ pytest.importorskip("PIL")
 from system2_agent.experiments.locomanipulation.control import (
     Pose, Trajectory, body_pose, native_targets, rotation,
 )
-from system2_agent.experiments.locomanipulation.runtime import Runtime
+from system2_agent.experiments.locomanipulation.runtime import Runtime, compose_evidence_frame
 from system2_agent.experiments.locomanipulation.scene import (
     BODY_JOINTS, CAMERAS, Evaluator, build_scene,
 )
@@ -176,6 +176,23 @@ def test_renderer_uses_only_allowlisted_cameras(scene, tmp_path):
     assert runtime.renderer.calls == list(CAMERAS)
     assert all(frame.url.startswith("data:image/jpeg;base64,") for frame in frames)
     runtime.close()
+
+
+def test_evidence_frame_has_three_agent_views_observer_and_action_panel():
+    from PIL import Image
+    images = {
+        "head_camera": Image.new("RGB", (64, 48), (255, 0, 0)),
+        "cam_left_wrist": Image.new("RGB", (64, 48), (0, 255, 0)),
+        "cam_right_wrist": Image.new("RGB", (64, 48), (0, 0, 255)),
+    }
+    observer = Image.new("RGB", (64, 48), (255, 255, 0))
+    frame = compose_evidence_frame(images, observer, 3, "executing move_to",
+                                   {"body": {"mode": "squat"}, "duration_s": 2})
+    assert frame.size == (1280, 720)
+    assert frame.getpixel((500, 300)) == (255, 255, 0)
+    assert frame.getpixel((1000, 300)) == (255, 0, 0)
+    assert frame.getpixel((800, 650)) == (0, 255, 0)
+    assert frame.getpixel((1150, 650)) == (0, 0, 255)
 
 
 def test_supported_or_untouched_scene_cannot_pass(scene):

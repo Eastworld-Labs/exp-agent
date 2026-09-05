@@ -502,9 +502,11 @@ PYTHONPATH=src:../robot_class ../robot_class/.venv/bin/python \
 
 The official stack has been cloned at `../GR00T-WholeBodyControl`. The latest
 `../robot_class` owns SONIC v1/v1.1 variant selection, asset layout, deploy setup,
-and the canonical `command`/reference protocol. This package only adds the
-navigation-specific `planner` publisher. Simulation ground truth supplies
-localization; on the robot, replace it with SLAM/VIO.
+the canonical `command`/reference protocol, and the native `planner` publisher.
+This package converts navigation and manipulation intent into namespaced
+robot_class actions; it does not construct SONIC wire packets or own the ZMQ
+transport. Simulation ground truth supplies localization; on the robot, replace
+it with SLAM/VIO.
 
 On a supported Ubuntu NVIDIA system:
 

@@ -33,12 +33,15 @@ def main() -> None:
     parser.add_argument("--max-model-calls", type=int, default=30)
     parser.add_argument("--startup-seconds", type=float, default=60)
     parser.add_argument("--episode-seconds", type=float, default=300)
+    parser.add_argument("--record-video", action="store_true",
+                        help="Record a continuous head/left-wrist/right-wrist evidence video")
+    parser.add_argument("--record-fps", type=float, default=5)
     args = parser.parse_args()
     if args.connect_sonic and not (args.model or args.actions):
         parser.error("--connect-sonic requires --model or --actions")
     if not args.connect_sonic and (args.model or args.actions):
         parser.error("--model and --actions require --connect-sonic")
-    if args.startup_seconds <= 0 or args.episode_seconds <= 0 or args.max_model_calls < 1:
+    if args.startup_seconds <= 0 or args.episode_seconds <= 0 or args.max_model_calls < 1 or not 1 <= args.record_fps <= 15:
         parser.error("timeouts and model-call budget must be positive")
     if args.connect_sonic and platform.system() != "Linux":
         parser.error("official SONIC execution requires Linux/CUDA/TensorRT; use --preview on this machine")
@@ -56,7 +59,9 @@ def main() -> None:
                           "sonic_files_present": not any(not p.exists() for p in required),
                           "problems": problems, "controller_execution_validated": False}, indent=2))
         return
-    runtime = Runtime(scene, output=args.output, startup_s=args.startup_seconds, max_episode_s=args.episode_seconds)
+    runtime = Runtime(scene, output=args.output, startup_s=args.startup_seconds,
+                      max_episode_s=args.episode_seconds, record_video=args.record_video,
+                      record_fps=args.record_fps)
     report = {}
     try:
         if args.preview:

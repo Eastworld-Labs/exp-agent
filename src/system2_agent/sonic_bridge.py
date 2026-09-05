@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import math
-import json
-import struct
 import time
 from collections.abc import Callable
 from typing import Any, Sequence
@@ -16,52 +14,41 @@ IDLE = 0
 SLOW_WALK = 1
 
 
-def _packed_message(topic: str, fields: list[tuple[str, str, list[int], bytes]]) -> bytes:
-    header = {
-        "v": 1,
-        "endian": "le",
-        "count": 1,
-        "fields": [
-            {"name": name, "dtype": dtype, "shape": shape}
-            for name, dtype, shape, _ in fields
-        ],
-    }
-    encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > HEADER_SIZE:
-        raise ValueError("SONIC header exceeds 1280 bytes")
-    return topic.encode("utf-8") + encoded.ljust(HEADER_SIZE, b"\0") + b"".join(
-        value for _, _, _, value in fields
-    )
-
-
 def pack_sonic_command(*, start: bool, stop: bool, planner: bool = True) -> bytes:
-    """Use robot_class's canonical command protocol implementation."""
-    try:
-        from robot.sonic_token import pack_sonic_command_message
-    except ImportError:
-        # Isaac Sim's Python environment intentionally does not install all of
-        # robot_class's camera/service extras. Keep the exact canonical wire
-        # format available so the simulator bridge remains isolated.
-        fields = [
-            ("start", "u8", [1], struct.pack("B", 1 if start else 0)),
-            ("stop", "u8", [1], struct.pack("B", 1 if stop else 0)),
-            ("planner", "u8", [1], struct.pack("B", 1 if planner else 0)),
-        ]
-        header = {
-            "v": 4,
-            "endian": "le",
-            "count": 1,
-            "fields": [
-                {"name": name, "dtype": dtype, "shape": shape}
-                for name, dtype, shape, _ in fields
-            ],
-        }
-        encoded = json.dumps(header, separators=(",", ":")).encode("utf-8")
-        return b"command" + encoded.ljust(HEADER_SIZE, b"\0") + b"".join(
-            value for _, _, _, value in fields
-        )
-    else:
-        return pack_sonic_command_message(start=start, stop=stop, planner=planner)
+    """Compatibility wrapper around robot_class's canonical command packet."""
+    from robot.sonic_token import pack_sonic_command_message
+
+    return pack_sonic_command_message(start=start, stop=stop, planner=planner)
+
+
+def sonic_planner_action(
+    *,
+    mode: int,
+    movement: Sequence[float],
+    facing: Sequence[float],
+    speed: float,
+    height: float = -1.0,
+    upper_body_position: Sequence[float] | None = None,
+    upper_body_velocity: Sequence[float] | None = None,
+    vr_position: Sequence[float] | None = None,
+    vr_orientation: Sequence[float] | None = None,
+) -> dict[str, object]:
+    action: dict[str, object] = {
+        "sonic.planner_mode": mode,
+        "sonic.movement": tuple(movement),
+        "sonic.facing": tuple(facing),
+        "sonic.speed": speed,
+        "sonic.height": height,
+    }
+    for key, value in (
+        ("sonic.upper_body_position", upper_body_position),
+        ("sonic.upper_body_velocity", upper_body_velocity),
+        ("sonic.vr_position", vr_position),
+        ("sonic.vr_orientation", vr_orientation),
+    ):
+        if value is not None:
+            action[key] = tuple(value)
+    return action
 
 
 def pack_sonic_planner(
@@ -76,40 +63,15 @@ def pack_sonic_planner(
     vr_position: Sequence[float] | None = None,
     vr_orientation: Sequence[float] | None = None,
 ) -> bytes:
-    if vr_orientation is not None and vr_position is None:
-        raise ValueError("vr_orientation requires vr_position")
-    if vr_position is not None and upper_body_position is not None:
-        raise ValueError("choose three-point or joint upper-body control, not both")
-    fields = [
-            ("mode", "i32", [1], struct.pack("<i", mode)),
-            ("movement", "f32", [3], struct.pack("<fff", *movement)),
-            ("facing", "f32", [3], struct.pack("<fff", *facing)),
-            ("speed", "f32", [1], struct.pack("<f", speed)),
-            ("height", "f32", [1], struct.pack("<f", height)),
-    ]
-    for name, values in (
-        ("upper_body_position", upper_body_position),
-        ("upper_body_velocity", upper_body_velocity),
-    ):
-        if values is None:
-            continue
-        values = tuple(float(value) for value in values)
-        if len(values) != 17:
-            raise ValueError(f"{name} must contain SONIC's 17 upper-body joints")
-        fields.append((name, "f32", [17], struct.pack("<17f", *values)))
-    # Native PLANNER_VR_3PT: left wrist, right wrist, head; quaternions wxyz.
-    # These targets bypass the kinematic planner and select teleop encoder 1.
-    for name, values, size in (
-        ("vr_position", vr_position, 9),
-        ("vr_orientation", vr_orientation, 12),
-    ):
-        if values is None:
-            continue
-        values = tuple(float(value) for value in values)
-        if len(values) != size or not all(math.isfinite(value) for value in values):
-            raise ValueError(f"{name} must contain {size} finite values")
-        fields.append((name, "f32", [size], struct.pack(f"<{size}f", *values)))
-    return _packed_message("planner", fields)
+    """Compatibility wrapper around robot_class's canonical planner packet."""
+    from robot.sonic_token import pack_sonic_planner_message
+
+    return pack_sonic_planner_message(sonic_planner_action(
+        mode=mode, movement=movement, facing=facing, speed=speed, height=height,
+        upper_body_position=upper_body_position,
+        upper_body_velocity=upper_body_velocity,
+        vr_position=vr_position, vr_orientation=vr_orientation,
+    ))
 
 
 class SonicZmqBase:
@@ -134,24 +96,15 @@ class SonicZmqBase:
         max_facing_rate: float = 0.3,
     ) -> None:
         try:
-            import zmq
+            from robot import ZmqSonicPlannerBridge
         except ImportError as exc:
-            raise ImportError("SonicZmqBase needs pyzmq: pip install -e '.[sonic]'") from exc
-        try:
-            from robot.sonic_variants import normalize_sonic_variant
-        except ImportError:
-            aliases = {"v1.1": "sonic_v1_1", "v1_1": "sonic_v1_1", "sonic-v1-1": "sonic_v1_1"}
-            self.sonic_variant = aliases.get(sonic_variant, sonic_variant)
-            if self.sonic_variant not in {"v1", "low_latency", "sonic_v1_1"}:
-                raise ValueError(f"unknown SONIC variant {sonic_variant!r}")
-        else:
-            self.sonic_variant = normalize_sonic_variant(sonic_variant)
+            raise ImportError("SonicZmqBase requires the sibling robot_class package") from exc
+        self._bridge = ZmqSonicPlannerBridge(endpoint=endpoint, bind=True, sonic_variant=sonic_variant)
+        self.sonic_variant = self._bridge.sonic_variant
         if self.sonic_variant == "auto":
             raise ValueError("SonicZmqBase requires a resolved SONIC variant")
         self._pose_provider = pose_provider
-        self._context = zmq.Context()
-        self._publisher = self._context.socket(zmq.PUB)
-        self._publisher.bind(endpoint)
+        self._bridge.connect()
         self._yaw_reference = pose_provider().yaw
         self._planner_update_s = planner_update_s
         self._max_facing_rate = max_facing_rate
@@ -167,7 +120,7 @@ class SonicZmqBase:
         self._closed = False
         if settle_s:
             time.sleep(settle_s)
-        self._publisher.send(pack_sonic_command(start=True, stop=False, planner=True))
+        self._bridge.start_control(planner=True)
 
     def pose(self) -> Pose3D:
         return self._pose_provider()
@@ -227,8 +180,8 @@ class SonicZmqBase:
             self._latched_planner = proposed
             self._last_planner_update = now
         latched_mode, latched_movement, latched_facing, latched_speed = self._latched_planner
-        self._publisher.send(
-            pack_sonic_planner(
+        self._bridge.send_action(
+            sonic_planner_action(
                 mode=latched_mode,
                 movement=latched_movement,
                 facing=latched_facing,
@@ -272,14 +225,14 @@ class SonicZmqBase:
     def start(self, *, planner: bool = True) -> None:
         if self._closed:
             raise RuntimeError("SONIC bridge is closed")
-        self._publisher.send(pack_sonic_command(start=True, stop=False, planner=planner))
+        self._bridge.start_control(planner=planner)
 
     def stop(self) -> None:
         if self._closed:
             return
         facing = (math.cos(self._yaw_reference), math.sin(self._yaw_reference), 0.0)
-        self._publisher.send(
-            pack_sonic_planner(
+        self._bridge.send_action(
+            sonic_planner_action(
                 mode=IDLE,
                 movement=(0.0, 0.0, 0.0),
                 facing=facing,
@@ -295,9 +248,8 @@ class SonicZmqBase:
             return
         self.stop()
         if stop_control:
-            self._publisher.send(pack_sonic_command(start=False, stop=True, planner=True))
-        self._publisher.close(linger=0)
-        self._context.term()
+            self._bridge.stop_control(planner=True)
+        self._bridge.disconnect()
         self._closed = True
 
 

@@ -47,7 +47,12 @@ def build_scene(asset_dir: Path, task: str) -> Scene:
     tree = ET.parse(asset_dir / "g1_dex1_converted.xml").getroot()
     compiler = tree.find("compiler")
     assert compiler is not None
-    compiler.set("meshdir", str(asset_dir / "meshes"))
+    # mj_saveLastXML preserves the URDF's ``meshes/...`` file prefix, while
+    # older conversion helpers emitted bare mesh filenames.  Resolve either
+    # representation without requiring a converter-specific directory layout.
+    mesh_files = [mesh.get("file", "") for mesh in tree.findall("./asset/mesh")]
+    prefixed = any(Path(filename).parts[:1] == ("meshes",) for filename in mesh_files)
+    compiler.set("meshdir", str(asset_dir if prefixed else asset_dir / "meshes"))
     ET.SubElement(tree, "option", timestep="0.002", gravity="0 0 -9.81", integrator="implicitfast")
     visual = ET.SubElement(tree, "visual")
     ET.SubElement(visual, "global", offwidth="640", offheight="480")

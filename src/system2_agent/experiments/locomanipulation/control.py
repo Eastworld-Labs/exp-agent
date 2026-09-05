@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import mujoco
 import numpy as np
 
-from ...sonic_bridge import pack_sonic_planner
+from ...sonic_bridge import sonic_planner_action
 from ...tools import Tool, object_schema
 from .scene import VR_OFFSETS
 
@@ -178,7 +178,7 @@ class Trajectory:
         apertures = {s: (1 - u) * self.gripper_start[s] + u * self.grippers[s] for s in self.grippers}
         return wrists, apertures, u
 
-    def packet(self, now: float, root: Pose) -> bytes:
+    def planner_action(self, now: float, root: Pose) -> dict[str, object]:
         wrists, _, u = self.sample(now)
         head = Pose((1 - u) * self.head_local.position + u * self.head_target.position,
                     slerp(self.head_local.quaternion, self.head_target.quaternion, u))
@@ -187,10 +187,18 @@ class Trajectory:
         finished = now >= self.start_time + self.duration
         mode = 0 if finished and self.mode == 1 else self.mode
         yaw = self.yaw + self.turn * u
-        return pack_sonic_planner(mode=mode, movement=(0, 0, 0) if finished else self.movement,
-                                  facing=(math.cos(yaw), math.sin(yaw), 0), speed=0 if finished else self.speed,
-                                  height=(self.start_height + u * (self.height - self.start_height)) if self.mode == 4 else -1,
-                                  vr_position=positions, vr_orientation=orientations)
+        return sonic_planner_action(
+            mode=mode, movement=(0, 0, 0) if finished else self.movement,
+            facing=(math.cos(yaw), math.sin(yaw), 0), speed=0 if finished else self.speed,
+            height=(self.start_height + u * (self.height - self.start_height)) if self.mode == 4 else -1,
+            vr_position=positions, vr_orientation=orientations,
+        )
+
+    def packet(self, now: float, root: Pose) -> bytes:
+        """Compatibility helper; live publishing is owned by robot_class."""
+        from robot.sonic_token import pack_sonic_planner_message
+
+        return pack_sonic_planner_message(self.planner_action(now, root))
 
 
 class ManipulationModule:
