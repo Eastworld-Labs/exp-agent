@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import time
 from dataclasses import asdict
 from pathlib import Path
+
+from dotenv import find_dotenv, load_dotenv
 
 from ...agent import System2Agent
 from ...model import OpenAICompatibleModel
@@ -16,6 +19,9 @@ from .scene import TASKS, build_scene
 
 
 def main() -> None:
+    dotenv_path = find_dotenv(usecwd=True)
+    if dotenv_path:
+        load_dotenv(dotenv_path, override=False)
     workspace = Path(__file__).resolve().parents[5]
     parser = argparse.ArgumentParser(description="G1 Dex-1 native SONIC 1.1 manipulation experiments (simulation only)")
     parser.add_argument("--task", choices=TASKS, required=True)
@@ -37,6 +43,8 @@ def main() -> None:
                         help="Record a continuous head/left-wrist/right-wrist evidence video")
     parser.add_argument("--record-fps", type=float, default=5)
     args = parser.parse_args()
+    if args.connect_sonic and args.model is None and args.actions is None:
+        args.model = os.getenv("SYSTEM2_MODEL")
     if args.connect_sonic and not (args.model or args.actions):
         parser.error("--connect-sonic requires --model or --actions")
     if not args.connect_sonic and (args.model or args.actions):

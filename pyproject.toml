@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "A small, model-portable System-2 mission agent for robots."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "python-dotenv>=1.0",
+]
 
 [project.optional-dependencies]
 locomanipulation = [

@@ -7,6 +7,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
+from dotenv import find_dotenv, load_dotenv
+
 from .types import AssistantTurn, Json, ToolCall
 
 
@@ -32,6 +34,11 @@ class OpenAICompatibleModel:
         base_url: str | None = None,
         api_key_env: str | None = None,
     ) -> "OpenAICompatibleModel":
+        # Load the nearest .env without replacing values explicitly exported by
+        # the operator or process supervisor.
+        dotenv_path = find_dotenv(usecwd=True)
+        if dotenv_path:
+            load_dotenv(dotenv_path, override=False)
         provider, separator, bare_model = model.partition("/")
         routes = {
             "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),

@@ -155,6 +155,14 @@ continues while the model thinks. Each completed action stops commanded walking
 and keeps streaming the hand/body hold target; the total wall-clock episode is
 bounded. A model-requested finish is **not** an evaluation pass.
 
+The CLI automatically loads the nearest `.env` without overriding variables
+already exported by the process supervisor. Set `SYSTEM2_MODEL` plus the matching
+provider key there to omit `--model`; `.env` is gitignored. Known provider routes
+use `OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, or
+`OPENROUTER_API_KEY`. `SYSTEM2_API_KEY` is only the fallback for a custom
+OpenAI-compatible `SYSTEM2_BASE_URL`, unless selected explicitly with
+`--api-key-env`.
+
 ## Action representation and source contract
 
 The agent's single `move_to` action contains optional `left_wrist`/`right_wrist`
