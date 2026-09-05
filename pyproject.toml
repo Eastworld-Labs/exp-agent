@@ -7,6 +7,12 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
+locomanipulation = [
+  "mujoco>=3.3",
+  "numpy>=1.24",
+  "pillow>=10",
+  "pyzmq>=25",
+]
 sim = [
   "mujoco>=3.0",
   "numpy>=1.24",
@@ -33,6 +39,7 @@ isaac = [
 exp-agent = "system2_agent.cli:main"
 exp-agent-sim = "system2_agent.sim_cli:main"
 exp-agent-sonic-sim = "system2_agent.official_sonic_sim_cli:main"
+exp-agent-locomanipulation = "system2_agent.experiments.locomanipulation.__main__:main"
 exp-agent-import-simfoundry = "system2_agent.simfoundry_importer:main"
 
 [build-system]

@@ -1,0 +1,8 @@
+[
+  {
+    "body": {"mode": "idle"},
+    "duration_s": 2.0,
+    "left_gripper": 1.0,
+    "right_gripper": 1.0
+  }
+]

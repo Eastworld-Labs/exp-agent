@@ -73,7 +73,13 @@ def pack_sonic_planner(
     height: float = -1.0,
     upper_body_position: Sequence[float] | None = None,
     upper_body_velocity: Sequence[float] | None = None,
+    vr_position: Sequence[float] | None = None,
+    vr_orientation: Sequence[float] | None = None,
 ) -> bytes:
+    if vr_orientation is not None and vr_position is None:
+        raise ValueError("vr_orientation requires vr_position")
+    if vr_position is not None and upper_body_position is not None:
+        raise ValueError("choose three-point or joint upper-body control, not both")
     fields = [
             ("mode", "i32", [1], struct.pack("<i", mode)),
             ("movement", "f32", [3], struct.pack("<fff", *movement)),
@@ -91,6 +97,18 @@ def pack_sonic_planner(
         if len(values) != 17:
             raise ValueError(f"{name} must contain SONIC's 17 upper-body joints")
         fields.append((name, "f32", [17], struct.pack("<17f", *values)))
+    # Native PLANNER_VR_3PT: left wrist, right wrist, head; quaternions wxyz.
+    # These targets bypass the kinematic planner and select teleop encoder 1.
+    for name, values, size in (
+        ("vr_position", vr_position, 9),
+        ("vr_orientation", vr_orientation, 12),
+    ):
+        if values is None:
+            continue
+        values = tuple(float(value) for value in values)
+        if len(values) != size or not all(math.isfinite(value) for value in values):
+            raise ValueError(f"{name} must contain {size} finite values")
+        fields.append((name, "f32", [size], struct.pack(f"<{size}f", *values)))
     return _packed_message("planner", fields)
 
 

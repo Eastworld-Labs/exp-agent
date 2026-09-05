@@ -7,6 +7,7 @@ import argparse
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +28,18 @@ from system2_agent.sim.sonic_dds import (  # noqa: E402
 from cyclonedds.domain import DomainParticipant  # noqa: F401,E402
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize  # noqa: E402
 from gear_sonic.utils.mujoco_sim.unitree_sdk2py_bridge import UnitreeSdk2Bridge  # noqa: E402
+
+
+class FreshCommandBridge(UnitreeSdk2Bridge):
+    """Do not make an old DDS command look fresh by retransmitting it over UDP."""
+
+    def __init__(self, config):
+        self.last_motor_command_s = 0.0
+        super().__init__(config)
+
+    def LowCmdHandler(self, msg):
+        super().LowCmdHandler(msg)
+        self.last_motor_command_s = time.monotonic()
 
 
 def configuration() -> dict[str, object]:
@@ -78,7 +91,7 @@ def main() -> None:
     parser.add_argument("--isaac-port", type=int, default=17891)
     args = parser.parse_args()
     ChannelFactoryInitialize(0, "lo")
-    bridge = UnitreeSdk2Bridge(configuration())
+    bridge = FreshCommandBridge(configuration())
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", args.listen_port))
     target = ("127.0.0.1", args.isaac_port)
@@ -89,7 +102,7 @@ def main() -> None:
             publish(bridge, packet)
         except ValueError:
             continue
-        if bridge.low_cmd_received:
+        if bridge.low_cmd_received and time.monotonic() - bridge.last_motor_command_s < 0.1:
             sock.sendto(pack_command(command_from_bridge(bridge)), target)
 
 

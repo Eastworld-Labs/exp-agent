@@ -783,3 +783,11 @@ is not independently movable. Manipulation requires rigid props reconstructed
 and registered from the same room (for example a SimFoundry capture) or a
 coherent rigid-object scene such as ReplicaCAD. Treating pixels from a splat as
 free bodies would produce the floating-object error this architecture forbids.
+
+## G1 Dex-1 manipulation experiments
+
+The isolated [loco-manipulation experiments](experiments/locomanipulation/README.md)
+provide a three-camera tabletop pick-and-place scene and a two-hand floor-basket
+pickup scene, with native SONIC 1.1 planner/three-point commands and private
+physics scoring. Scene previews work locally; learned-controller task execution
+requires the Linux SONIC runtime and has not yet been validated on the Dex-1 model.

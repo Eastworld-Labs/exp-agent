@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import struct
+import time
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -150,6 +151,7 @@ class SonicUdpClient:
         self._socket.bind(bind_address)
         self._socket.setblocking(False)
         self.latest_command: SonicMotorCommand | None = None
+        self.last_command_received_s: float | None = None
 
     def exchange(self, state: SonicState) -> SonicMotorCommand | None:
         self._socket.sendto(pack_state(state), self._sidecar_address)
@@ -159,6 +161,7 @@ class SonicUdpClient:
             except BlockingIOError:
                 break
             self.latest_command = unpack_command(packet)
+            self.last_command_received_s = time.monotonic()
         return self.latest_command
 
     def close(self) -> None:
